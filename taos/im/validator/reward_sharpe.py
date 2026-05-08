@@ -5,18 +5,22 @@
 # Copyright © 2025 Rayleigh Research
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
 
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+"""
+Legacy Sharpe-based reward computation (unrealized + realized), retained for
+reference. Active scoring uses reward.py (Kappa-3-based).
+"""
 
 import torch
 import random
@@ -31,15 +35,17 @@ from taos.im.utils.sharpe import sharpe, batch_sharpe
 
 def score_uid(validator_data: Dict, uid: int) -> float:
     """
-    Calculates the new score value for a specific UID.
+    Calculates the combined unrealized + realized Sharpe score for a specific UID.
 
     Args:
-        validator_data (Dict): Dictionary containing validator state
-        uid (int): UID of miner being scored
-        inventory_values (Dict[int, Dict[int, float]]): Inventory values for the miner
+        validator_data (Dict): Dictionary containing validator state, including
+            sharpe_values, activity_factors, activity_factors_realized,
+            compact_volumes, compact_roundtrip_volumes, config, simulation_config,
+            reward_weights, and simulation_timestamp.
+        uid (int): UID of the miner to score.
 
     Returns:
-        float: The new score value for the given UID.
+        float: The combined Sharpe score for the given UID.
     """
     sharpe_values = validator_data['sharpe_values']
     activity_factors = validator_data['activity_factors']

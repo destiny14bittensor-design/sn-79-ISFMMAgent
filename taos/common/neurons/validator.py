@@ -17,6 +17,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+"""
+Base validator neuron: metagraph sync, weight setting, and two-pool reward
+allocation combining trading (Kappa-3) and GenTRX training scores.
+"""
 
 import copy
 import torch
@@ -25,8 +29,72 @@ import argparse
 import threading
 import bittensor as bt
 
-from typing import List
+from typing import List, Optional, Tuple
 from traceback import print_exception
+
+
+def compute_two_pool_allocation(
+    trading_scores: torch.Tensor,
+    gentrx_scores: torch.Tensor,
+    *,
+    burn_ratio: float,
+    gentrx_simulation_share: float,
+    n_target: int,
+    burn_uid: Optional[int] = None,
+) -> Tuple[torch.Tensor, dict]:
+    """Compute on-chain weights from per-UID trading and gentrx score vectors.
+
+    Miner rewards split between two pools: trading (kappa+pnl) and training
+    (gentrx). `gentrx_simulation_share` caps the training share at full
+    participation; the actual training allocation scales by
+    `n_active / n_target`, and any unused training share returns to trading.
+
+    Returns:
+        (raw_weights, summary) — the L1-normalized weight vector and a
+        breakdown of the pool allocation suitable for logging or inspection.
+    """
+    trading_scores = torch.nan_to_num(trading_scores, 0.0)
+    gentrx_scores = torch.nan_to_num(gentrx_scores, 0.0)
+
+    trading_for_norm = trading_scores
+    if trading_for_norm.numel() > 0 and float(torch.min(trading_for_norm)) < 0:
+        trading_for_norm = trading_for_norm - torch.min(trading_for_norm)
+    trading_weights = torch.nn.functional.normalize(trading_for_norm, p=1, dim=0)
+    gentrx_weights = torch.nn.functional.normalize(gentrx_scores, p=1, dim=0)
+
+    burn_ratio = max(0.0, min(1.0, float(burn_ratio or 0.0)))
+    gentrx_sim_share = max(0.0, min(1.0, float(gentrx_simulation_share or 0.0)))
+    n_active = int((gentrx_scores > 0).sum().item())
+    shrink = (n_active / n_target) if n_target > 0 else 0.0
+    shrink = max(0.0, min(1.0, shrink))
+
+    simulation_pool = 1.0 - burn_ratio
+    gentrx_alloc = simulation_pool * gentrx_sim_share * shrink
+    trading_alloc = simulation_pool - gentrx_alloc
+    burn_alloc = burn_ratio
+
+    raw_weights = (
+        trading_alloc * trading_weights
+        + gentrx_alloc * gentrx_weights
+    )
+
+    if burn_uid is not None and 0 <= burn_uid < raw_weights.numel() and burn_alloc > 0:
+        raw_weights[burn_uid] = raw_weights[burn_uid] + burn_alloc
+
+    raw_weights = torch.nn.functional.normalize(raw_weights, p=1, dim=0)
+
+    summary = {
+        'simulation_pool': simulation_pool,
+        'trading_alloc': trading_alloc,
+        'gentrx_alloc': gentrx_alloc,
+        'burn_alloc': burn_alloc,
+        'n_active': n_active,
+        'n_target': n_target,
+        'shrink': shrink,
+        'gentrx_simulation_share': gentrx_sim_share,
+        'burn_ratio': burn_ratio,
+    }
+    return raw_weights, summary
 
 from abc import abstractmethod
 
@@ -63,10 +131,15 @@ class BaseValidatorNeuron(BaseNeuron):
             self.dendrite = bt.Dendrite(wallet=self.wallet)
         bt.logging.info(f"Dendrite: {self.dendrite}")
 
-        # Set up initial scoring weights for validation
+        # `self.scores` holds the slow-EMA of trading rewards (kappa+pnl
+        # after Pareto). `self.gentrx_scores` holds the slow-EMA of the
+        # GenTRX rank-normalized score (no Pareto). Combined in prepare_weights.
         self.scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32, device=self.device
-        )        
+        )
+        self.gentrx_scores = torch.zeros(
+            self.metagraph.n, dtype=torch.float32, device=self.device
+        )
         self.pending_weights = []
         self.last_commit = None
 
@@ -170,54 +243,61 @@ class BaseValidatorNeuron(BaseNeuron):
             self.is_running = False
             bt.logging.debug("Stopped")
 
-    def prepare_weights(self):        
-        """
-        Sets the validator weights to the metagraph hotkeys based on the scores it has received from the miners. 
-        The weights determine the trust and incentive level the validator assigns to miner nodes on the network.
-        
-        If burn_uid and burn_ratio are configured, automatically allocates a percentage of emissions to the burn address.
-        """
-        network_scores = self.scores[:self.metagraph.n]
-        # Check if self.scores contains any NaN values and log a warning if it does.
-        if torch.isnan(network_scores).any():
-            bt.logging.warning(
-                f"Scores contain NaN values. This may be due to a lack of responses from miners, or a bug in the reward function."
-            )
+    def prepare_weights(self):
+        """Build the on-chain weight vector via the trading / training split.
 
-        bt.logging.debug(f"Processing Scores: {network_scores}")
-        # Calculate the average reward for each uid across non-zero values.
-        # Replace any NaN values with 0.
-        weight_scores = network_scores
-        if min(network_scores) < 0:
-            weight_scores = network_scores - min(network_scores)
-        raw_weights = torch.nn.functional.normalize(weight_scores, p=1, dim=0)
+        Delegates the math to `compute_two_pool_allocation` so the same
+        function is exercised by the standalone scoring inspector.
+        """
+        network_trading_scores = self.scores[:self.metagraph.n]
+        network_gentrx_scores = self.gentrx_scores[:self.metagraph.n]
 
-        # Apply burn mechanism if configured
+        if torch.isnan(network_trading_scores).any():
+            bt.logging.warning("Trading scores contain NaN values. Replacing with 0.")
+        if torch.isnan(network_gentrx_scores).any():
+            bt.logging.warning("GenTRX scores contain NaN values. Replacing with 0.")
+
+        bt.logging.debug(f"Processing trading scores: {network_trading_scores}")
+        bt.logging.debug(f"Processing gentrx scores:  {network_gentrx_scores}")
+
         burn_uid = getattr(self.config.neuron, 'burn_uid', None)
-        burn_ratio = getattr(self.config.neuron, 'burn_ratio', 0.0)
-        
-        if burn_uid is not None and burn_ratio > 0:
-            # Validate burn_ratio is between 0 and 1
-            burn_ratio = max(0.0, min(1.0, burn_ratio))
-            
-            # Validate burn_uid exists in metagraph
-            if burn_uid >= len(raw_weights):
-                bt.logging.warning(
-                    f"Burn UID {burn_uid} is out of range (metagraph size: {len(raw_weights)}). Skipping burn allocation."
-                )
-            else:
-                bt.logging.info(f"Applying {burn_ratio*100:.2f}% emission burn to UID {burn_uid}")
-                
-                # Scale down all existing weights by (1 - burn_ratio)
-                raw_weights = raw_weights * (1.0 - burn_ratio)
-                
-                # Allocate burn_ratio to the burn_uid
-                raw_weights[burn_uid] = burn_ratio
-                
-                # Renormalize to ensure sum is 1.0
-                raw_weights = torch.nn.functional.normalize(raw_weights, p=1, dim=0)
-                
-                bt.logging.debug(f"Post-burn weight for UID {burn_uid}: {raw_weights[burn_uid]:.6f}")
+        burn_ratio = getattr(self.config.neuron, 'burn_ratio', 0.0) or 0.0
+
+        scoring_cfg = getattr(self.config, 'scoring', None)
+        gentrx_cfg = getattr(scoring_cfg, 'gentrx', None) if scoring_cfg is not None else None
+        gentrx_sim_share = getattr(gentrx_cfg, 'simulation_share', 0.0) if gentrx_cfg is not None else 0.0
+
+        get_n_target = getattr(self, 'get_n_target_miners', None)
+        n_target = get_n_target() if callable(get_n_target) else self.metagraph.n
+
+        if burn_uid is not None and burn_uid >= self.metagraph.n:
+            bt.logging.warning(
+                f"Burn UID {burn_uid} is out of range (metagraph size: {self.metagraph.n}). "
+                f"Burn allocation will be lost."
+            )
+            burn_uid_arg = None
+        else:
+            burn_uid_arg = burn_uid
+
+        raw_weights, summary = compute_two_pool_allocation(
+            network_trading_scores,
+            network_gentrx_scores,
+            burn_ratio=burn_ratio,
+            gentrx_simulation_share=gentrx_sim_share,
+            n_target=n_target,
+            burn_uid=burn_uid_arg,
+        )
+
+        bt.logging.info(
+            f"Pool allocation: trading={summary['trading_alloc']*100:.4f}% "
+            f"gentrx={summary['gentrx_alloc']*100:.4f}% "
+            f"(sim_share={summary['gentrx_simulation_share']*100:.2f}%, "
+            f"N={summary['n_active']}/{summary['n_target']}, "
+            f"shrink={summary['shrink']:.4f}) "
+            f"burn={summary['burn_alloc']*100:.4f}%"
+        )
+        if burn_uid is not None and 0 <= burn_uid < raw_weights.numel():
+            bt.logging.debug(f"Post-burn weight for UID {burn_uid}: {raw_weights[burn_uid]:.6f}")
 
         bt.logging.debug(f"raw_weights={raw_weights}")
         bt.logging.debug(f"raw_weight_uids={self.metagraph.uids}")
@@ -299,62 +379,80 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.handle_deregistration(uid)
 
         # Check to see if the metagraph has changed size.
-        # If so, we need to add new hotkeys and moving averages.
+        # If so, we need to add new hotkeys and moving averages for both
+        # the trading and gentrx score vectors.
         if len(self.hotkeys) < len(self.metagraph.hotkeys):
-            # Update the size of the moving average scores.
             bt.logging.debug("Handling new hotkeys...")
-            new_moving_average = torch.zeros((self.metagraph.n)).to(
-                self.device
-            )
+            new_trading = torch.zeros((self.metagraph.n)).to(self.device)
             min_len = min(len(self.hotkeys), len(self.scores))
-            new_moving_average[:min_len] = self.scores[:min_len]
-            self.scores = new_moving_average
+            new_trading[:min_len] = self.scores[:min_len]
+            self.scores = new_trading
+
+            new_gentrx = torch.zeros((self.metagraph.n)).to(self.device)
+            min_len_g = min(len(self.hotkeys), len(self.gentrx_scores))
+            new_gentrx[:min_len_g] = self.gentrx_scores[:min_len_g]
+            self.gentrx_scores = new_gentrx
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
-    def update_scores(self, rewards: torch.FloatTensor, uids: List[int]):
-        """Performs exponential moving average on the scores based on the rewards received from the miners."""
-        bt.logging.debug("Updating Scores...")
-        # Check if rewards contains NaN values.
-        if torch.isnan(rewards).any():
-            bt.logging.warning(f"NaN values detected in rewards: {rewards}")
-            # Replace any NaN values in rewards with 0.
-            rewards = torch.nan_to_num(rewards, 0)
+    def update_scores(
+        self,
+        trading_rewards: torch.FloatTensor,
+        uids: List[int],
+        gentrx_rewards: torch.FloatTensor = None,
+    ):
+        """EMAs trading and gentrx rewards independently into self.scores and self.gentrx_scores.
 
-        # Check if `uids` is already a tensor and clone it to avoid the warning.
+        `trading_rewards` is the post-Pareto trading reward vector; `gentrx_rewards`
+        is the rank-norm + per-UID EMA gentrx vector (no Pareto). Both apply the
+        same slow `moving_average_alpha`. `gentrx_rewards=None` is treated as a
+        zero vector (gentrx pool dormant).
+        """
+        bt.logging.debug("Updating Scores...")
+        if torch.isnan(trading_rewards).any():
+            bt.logging.warning(f"NaN values detected in trading rewards: {trading_rewards}")
+            trading_rewards = torch.nan_to_num(trading_rewards, 0)
+        if gentrx_rewards is not None and torch.isnan(gentrx_rewards).any():
+            bt.logging.warning(f"NaN values detected in gentrx rewards: {gentrx_rewards}")
+            gentrx_rewards = torch.nan_to_num(gentrx_rewards, 0)
+
         bt.logging.debug("Cloning UIDs...")
         if isinstance(uids, torch.Tensor):
             uids_tensor = uids.clone().detach().to(self.device)
         else:
             uids_tensor = torch.tensor(uids).to(self.device)
 
-        # Compute forward pass rewards, assumes uids are mutually exclusive.
-        # shape: [ metagraph.n ]
-        bt.logging.debug("Scattering...")
-        scattered_rewards: torch.FloatTensor = self.scores.scatter(
-            0, uids_tensor, rewards
-        ).to(self.device)
-        bt.logging.debug(f"Scattered rewards: {scattered_rewards}")
-
-        # Update scores with rewards produced by this step.
-        # shape: [ metagraph.n ]
-        bt.logging.debug("Calculating MA...")
         alpha: float = self.config.neuron.moving_average_alpha
-        self.scores: torch.FloatTensor = alpha * scattered_rewards + (
+
+        bt.logging.debug("Scattering trading rewards...")
+        scattered_trading: torch.FloatTensor = self.scores.scatter(
+            0, uids_tensor, trading_rewards
+        ).to(self.device)
+        self.scores: torch.FloatTensor = alpha * scattered_trading + (
             1 - alpha
         ) * self.scores.to(self.device)
-        bt.logging.debug(f"Updated moving avg scores: {self.scores}")
+        bt.logging.debug(f"Updated trading MA scores: {self.scores}")
+
+        if gentrx_rewards is not None:
+            bt.logging.debug("Scattering gentrx rewards...")
+            scattered_gentrx: torch.FloatTensor = self.gentrx_scores.scatter(
+                0, uids_tensor, gentrx_rewards
+            ).to(self.device)
+            self.gentrx_scores: torch.FloatTensor = alpha * scattered_gentrx + (
+                1 - alpha
+            ) * self.gentrx_scores.to(self.device)
+            bt.logging.debug(f"Updated gentrx MA scores: {self.gentrx_scores}")
 
     def save_state(self):
         """Saves the state of the validator to a file."""
         bt.logging.trace("Saving validator state.")
 
-        # Save the state of the validator to file.
         torch.save(
             {
                 "step": self.step,
                 "scores": self.scores,
+                "gentrx_scores": self.gentrx_scores,
                 "hotkeys": self.hotkeys,
             },
             self.config.neuron.full_path + "/state.pt",
@@ -364,8 +462,10 @@ class BaseValidatorNeuron(BaseNeuron):
         """Loads the state of the validator from a file."""
         bt.logging.info("Loading validator state.")
 
-        # Load the state of the validator from file.
         state = torch.load(self.config.neuron.full_path + "/state.pt", weights_only=False)
         self.step = state["step"]
         self.scores = state["scores"]
         self.hotkeys = state["hotkeys"]
+        self.gentrx_scores = state.get(
+            "gentrx_scores", torch.zeros_like(self.scores)
+        )

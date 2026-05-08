@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Kappa-3 (lower partial moment) risk-adjusted return calculation: per-UID
+realized P&L scoring with parallel batch processing via loky workers.
+"""
 import os
 import numpy as np
 import traceback

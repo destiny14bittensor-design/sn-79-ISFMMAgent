@@ -36,9 +36,8 @@ This document serves to provide details on the data displayed at the [τaos dash
   - [Daily Volume Plot](#daily-volume-plot)
   - [Round-Trip Volume Plot](#round-trip-volume-plot)
   - [Realized PnL Plot](#realized-pnl-plot)
-  - [Realized Sharpe Plots](#realized-sharpe-plots)
+  - [Kappa-3 Plots](#kappa-3-plots)
   - [Unrealized Profit \& Loss Plots](#unrealized-profit--loss-plots)
-  - [Unrealized Sharpe Plots](#unrealized-sharpe-plots)
   - [Fee Rates Plot](#fee-rates-plot)
   - [Balances Plots](#balances-plots)
 
@@ -197,15 +196,15 @@ The Agents table provides summary performance information for all miners in the 
 
 - **24H RT [QUOTE]** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for whichever book they traded in the least.
 
-- **Activity** - Activity score based on round-tripped trading volume executed in the latest Sharpe assessment window.
+- **Activity** - Activity score based on round-tripped trading volume executed in the latest assessment window.
 
-- **Realized PnL** - Realized Profit and Loss from closed positions over the latest Sharpe assessment window in QUOTE asset.
+- **Realized PnL** - Realized Profit and Loss from closed positions over the latest assessment window in QUOTE asset.
 
-- **Median Sharpe** - Median of realized Sharpe ratio values over all books.
+- **Median Kappa** - Median of Kappa-3 ratio values over all books.
 
 - **Penalty** - Penalty factor applied to the agent's score due to inconsistent realized Sharpe performance in one or more books.
 
-- **Sharpe Score** - Final Sharpe-based score calculated using activity-weighted median normalized realized Sharpe ratio with outlier penalty for latest assessment period.
+- **Kappa Score** - Final Kappa-based score calculated using activity-weighted median normalized realized Kappa-3 ratio with outlier penalty for latest assessment period.
 
 - **Score** - Final composite score determining agent ranking; obtained as an exponential moving average of the Sharpe score over a period of observations.
 
@@ -304,13 +303,13 @@ The Agents table at the Book page displays statistics for agents calculated spec
 
 - **24H RT [QUOTE]** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for the selected book.
 
-- **Activity** - Activity factor indicating agent's trading engagement level as a function of round-tripped volume.  This is multiplied onto the realized Sharpe score for each book to reward miners who achieve high risk-adjusted performance while also trading significant volume.
+- **Activity** - Activity factor indicating agent's trading engagement level as a function of round-tripped volume.  This is multiplied onto the Kappa-3 score for each book to reward miners who achieve high risk-adjusted performance while also trading significant volume.
 
-- **Realized PnL** - Realized Profit and Loss from closed positions over the latest Sharpe assessment window in QUOTE asset for the selected book.
+- **Realized PnL** - Realized Profit and Loss from closed positions over the latest assessment window in QUOTE asset for the selected book.
 
-- **Sharpe** - Realized Sharpe ratio for the selected book.
+- **Kappa** - Kappa-3 ratio for the selected book.
 
-- **Sharpe Score** - Sharpe-based score calculated as activity-weighted and normalized Sharpe ratio for latest assessment period on the selected book.
+- **Kappa Score** - Kappa3-based score calculated as activity-weighted and normalized Kappa-3 ratio for latest assessment period on the selected book.
 
 - **ΔInv [QUOTE]** - Total change in miner inventory value since the start of simulation or registration of the UID (whichever is more recent).
 
@@ -348,7 +347,7 @@ This page displays detailed statistics for a particular agent over all books for
 
 ### Agent Info
 
-![alt text](agent_data.png)
+![alt text](agent_info.png)
 
 The first two rows display basic information about the selected agent.
 
@@ -420,12 +419,12 @@ This plot illustrates the average volumes over all selected validators which wer
 
 This plot illustrates the realized PnL achieved by the agent in the most recent Sharpe assessment window over time.  Realized PnL is calculated from round tripped trades, using the price difference and fees/rebates to calculate the profit or loss realized through trading activity.
 
-### Realized Sharpe Plots
+### Kappa-3 Plots
 
-![alt text](agent_realized_sharpe.png)
+![alt text](agent_kappa.png)
 
-The Realized Sharpe plot displays the raw (unnormalized and unweighted) realized Sharpe ratio achieved by the agent on all books, as well as the median value.
-The Realized Sharpe Score plot displays the normalized and weighted Sharpe Score calculated for the agent for each book, as well as the median value.  The outlier penalty applied to the score is also plotted.
+The Kappa-3 plot displays the raw (unnormalized and unweighted) Kappa-3 ratio achieved by the agent on all books, as well as the median value.
+The Kappa-3 Score plot displays the normalized and weighted Kappa-3 Score calculated for the agent for each book, as well as the median value.  The outlier penalty applied to the score is also plotted.
 
 ### Unrealized Profit & Loss Plots
 
@@ -433,14 +432,6 @@ The Realized Sharpe Score plot displays the normalized and weighted Sharpe Score
 
 The Total Inventory Value Change plot illustrates the unrealized PnL (change in total inventory value) achieved by the agent since start of simulation or registration, for each book as well as in total.
 The Unrealized PnL plot ilustrates the profit and loss (change in inventory value) achieved by the agent over the preceding Sharpe assessment window, for each book individually and in total.
-
-### Unrealized Sharpe Plots
-
-![alt text](agent_sharpe.png)
-
-The Sharpe plot displays the raw (unnormalized and unweighted) Sharpe ratio achieved by the agent on all books, as well as the median value.
-The Sharpe Score plot displays the normalized and weighted Sharpe Score calculated for the agent for each book as well as the median value.  The outlier penalty applied to the score is also plotted.
-Since version 0.2.0, only realized Sharpe contributes to agent scoring - these plots are retained for reference only.
 
 ### Fee Rates Plot
 

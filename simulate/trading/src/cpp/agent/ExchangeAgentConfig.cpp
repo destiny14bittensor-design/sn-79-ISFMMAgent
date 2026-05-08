@@ -50,7 +50,6 @@ void ExchangeAgentConfig::setPriceIncrement(pugi::xml_node node)
             value)};
     } else {
         m_parameters.priceIncrementDecimals = value;
-        fmt::println("SET priceIncrementDecimals TO {}", value);
     }
 }
 
@@ -71,7 +70,6 @@ void ExchangeAgentConfig::setVolumeIncrement(pugi::xml_node node)
             value)};
     } else {
         m_parameters.volumeIncrementDecimals = value;
-        fmt::println("SET volumeIncrementDecimals TO {}", value);
     }
 }
 
@@ -92,7 +90,6 @@ void ExchangeAgentConfig::setBaseDecimals(pugi::xml_node node)
             value)};
     } else {
         m_parameters.baseIncrementDecimals = value;
-        fmt::println("SET baseIncrementDecimals TO {}", value);
     }
 }
 
@@ -113,7 +110,6 @@ void ExchangeAgentConfig::setQuoteDecimals(pugi::xml_node node)
             value)};
     } else {
         m_parameters.quoteIncrementDecimals = value;
-        fmt::println("SET quoteIncrementDecimals TO {}", value);
     }
 }
 

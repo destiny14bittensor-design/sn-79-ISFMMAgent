@@ -11,6 +11,7 @@ from taos.common.protocol import SimulationStateUpdate, EventNotification
 from taos.im.protocol.events import *
 from taos.im.protocol.models import Book, Account, Balance, Order
 from taos.im.protocol.response import FinanceAgentResponse
+from taos.im.protocol.gentrx import GenTRXAssignment
 from taos.im.utils.compress import compress, decompress
 
 """
@@ -295,7 +296,6 @@ class MarketSimulationStateUpdate(SimulationStateUpdate):
             object.__setattr__(ret, "notices", notices)
         else:
             object.__setattr__(ret, "books", data.get("books", {}))
-            object.__setattr__(ret, "accounts", data.get("accounts", {}))
             object.__setattr__(ret, "accounts", data.get("accounts", {}))
             object.__setattr__(ret, "notices", data.get("notices", {}))
         return ret

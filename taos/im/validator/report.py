@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Prometheus metrics reporting service: publishes validator, simulation, miner,
+book, trade, and GenTRX gauges via a FastAPI endpoint over POSIX IPC.
+"""
 import os
 import sys
 import traceback
@@ -31,6 +35,16 @@ import threading
 
 class ReportingService:
     def __init__(self, config):
+        """
+        Initialise the reporting service, setting up IPC channels and Prometheus metrics.
+
+        Creates POSIX message queues and shared memory segments for receiving
+        publish requests from the validator, initialises all Prometheus registries,
+        and starts the FastAPI metrics server in a background thread.
+
+        Args:
+            config: Configuration object with wallet, netuid, and prometheus settings.
+        """
         self.config = config
         self.wallet = bt.Wallet(
             path=self.config.wallet.path,
@@ -72,6 +86,12 @@ class ReportingService:
         self._init_prometheus()
         
     def _start_metrics_server(self):
+        """
+        Start a FastAPI server exposing per-registry Prometheus metric endpoints.
+
+        Binds to `config.prometheus.port` on all interfaces. Runs in a daemon
+        thread so it shuts down automatically when the process exits.
+        """
         app = FastAPI()
 
         @app.get("/metrics")
@@ -110,6 +130,11 @@ class ReportingService:
             """Trade metrics: trades, miner_trades"""
             return Response(content=generate_latest(self.registry_trades), media_type=CONTENT_TYPE_LATEST)
 
+        @app.get("/metrics/gentrx")
+        def gentrx_metrics():
+            """GenTRX distributed-training metrics: pool allocation, per-miner EMA scores."""
+            return Response(content=generate_latest(self.registry_gentrx), media_type=CONTENT_TYPE_LATEST)
+
         def run_server():
             uvicorn.run(app, host="0.0.0.0", port=self.config.prometheus.port, log_level="debug")
 
@@ -118,6 +143,12 @@ class ReportingService:
         bt.logging.success(f"Prometheus metrics server started on port {self.config.prometheus_port}")
     
     def _init_prometheus(self):
+        """
+        Initialise all Prometheus collector registries and metric objects.
+
+        Creates separate registries for validator, simulation, miner, agent, books,
+        trades, and gentrx metrics, then starts the metrics HTTP server.
+        """
         prometheus(
             config=self.config,
             port=self.config.prometheus.port,
@@ -130,6 +161,7 @@ class ReportingService:
         self.registry_agent = CollectorRegistry()
         self.registry_books = CollectorRegistry()
         self.registry_trades = CollectorRegistry()
+        self.registry_gentrx = CollectorRegistry()
 
         self.registries = {
             'validator': self.registry_validator,
@@ -138,6 +170,7 @@ class ReportingService:
             'agent': self.registry_agent,
             'books': self.registry_books,
             'trades': self.registry_trades,
+            'gentrx': self.registry_gentrx,
         }
 
         self.prometheus_counters = Counter('counters', 'Counter summaries for the running validator.', ['wallet', 'netuid', 'sim_id', 'timestamp', 'counter_name'], registry=self.registry_validator)
@@ -174,6 +207,9 @@ class ReportingService:
             'miner_gauge_name'
         ], registry=self.registry_miner)
         self.prometheus_info = Info('neuron_info', "Info summaries for the running validator.", ['wallet', 'netuid', 'sim_id'], registry=self.registry_validator)
+        self.prometheus_gentrx_gauges = Gauge('gentrx_gauges', 'GenTRX distributed-training validator metrics.', ['wallet', 'netuid', 'sim_id', 'gentrx_gauge_name'], registry=self.registry_gentrx)
+        self.prometheus_gentrx_miner_scores = Gauge('gentrx_miner_scores', 'Per-miner GenTRX EMA score (validator-smoothed).', ['wallet', 'netuid', 'sim_id', 'uid'], registry=self.registry_gentrx)
+        self.prometheus_gentrx_training = Gauge('gentrx_training', 'GenTRX model training statistics (loss, acceptance, timing).', ['wallet', 'netuid', 'sim_id', 'stat'], registry=self.registry_gentrx)
         self._start_metrics_server()
         self.prometheus_initialized = True
         
@@ -204,7 +240,14 @@ class ReportingService:
             bt.logging.error(f"Error clearing metrics: {e}")
             bt.logging.error(traceback.format_exc())
     
-    async def run(self):        
+    async def run(self):
+        """
+        Main async event loop for the reporting service.
+
+        Drains any stale IPC messages on startup, then waits for 'publish' or
+        'shutdown' commands from the validator via the POSIX request queue,
+        dispatching to `publish_metrics` and writing results back via shared memory.
+        """
         bt.logging.info("Reporting service started")
 
         while True:
@@ -293,6 +336,16 @@ class ReportingService:
         self.cleanup()
     
     async def publish_metrics(self, data):
+        """
+        Deserialise a reporting payload and publish all Prometheus metrics.
+
+        Clears stale metrics whenever the simulation ID changes, then delegates
+        to `report()` to push updated gauges.
+
+        Args:
+            data (dict): Decoded msgpack payload from the validator containing
+                simulation state, account balances, trade data, and scoring results.
+        """
         new_sim_id = data['simulation']['simulation_id']
         
         if self.current_sim_id is None:
@@ -350,12 +403,15 @@ class ReportingService:
             for uid, books in data['realized_pnl_by_book'].items()
         }
 
-        for key in ['activity_factors', 'pnl_factors', 'kappa_values', 
-                    'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances', 
-                    'initial_balances_published', 'simulation_timestamp', 'step', 
-                    'step_rates', 'fundamental_price', 'shared_state_rewarding', 
+        for key in ['activity_factors', 'pnl_factors', 'kappa_values',
+                    'unnormalized_scores', 'scores', 'miner_stats', 'initial_balances',
+                    'initial_balances_published', 'simulation_timestamp', 'step',
+                    'step_rates', 'fundamental_price', 'shared_state_rewarding',
                     'current_block', 'uid', 'metagraph_data', 'validator_config']:
             setattr(self, key, data[key])
+        self.gentrx_scores = data.get('gentrx_scores', {})
+        self.gentrx_enabled = data.get('gentrx_enabled', False)
+        self.gentrx_training = data.get('gentrx_training', {})
         
         class SimpleState:
             pass
@@ -378,11 +434,21 @@ class ReportingService:
         await report(self)
     
     def pagerduty_alert(self, message, details=None):
+        """
+        Log a critical alert message (stub — the reporting service has no PagerDuty hook).
+
+        Args:
+            message (str): Human-readable alert description.
+            details (dict, optional): Additional context to log alongside the message.
+        """
         bt.logging.error(f"ALERT: {message}")
         if details:
             bt.logging.error(f"Details: {details}")
     
     def cleanup(self):
+        """
+        Release all IPC and thread-pool resources held by the reporting service.
+        """
         self.request_queue.close()
         self.response_queue.close()
         self.request_mem.close()
@@ -422,6 +488,64 @@ def publish_validator_gauges(self: ReportingService):
     self.prometheus_validator_gauges.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id, validator_gauge_name="disk_usage_percent").set( disk_usage )    
     bt.logging.debug(f"Validator metrics published ({time.time()-start:.4f}s).")
 
+def publish_gentrx_gauges(self: ReportingService) -> None:
+    """
+    Publish GenTRX distributed-training metrics to the gentrx Prometheus registry.
+
+    Exposes pool-level gauges (enabled flag, simulation share, active miner count),
+    per-miner EMA-smoothed scores, and training statistics (loss, acceptance rate,
+    checkpoint version, round count, rollback count, and timing).
+
+    Args:
+        self (ReportingService): The reporting service instance holding Prometheus
+            gauge objects and the current gentrx_scores / gentrx_training state.
+    """
+    wallet_addr = self.wallet.hotkey.ss58_address
+    netuid = self.config.netuid
+    simid = self.simulation.simulation_id
+
+    gentrx_scores = getattr(self, 'gentrx_scores', {}) or {}
+    gentrx_enabled = getattr(self, 'gentrx_enabled', False)
+    gentrx_share = self.validator_config.get('scoring', {}).get('gentrx_simulation_share', 0.0)
+    active_miners = sum(1 for s in gentrx_scores.values() if s > 0)
+
+    g = self.prometheus_gentrx_gauges
+    g.labels(wallet=wallet_addr, netuid=netuid, sim_id=simid, gentrx_gauge_name="enabled").set(1 if gentrx_enabled else 0)
+    g.labels(wallet=wallet_addr, netuid=netuid, sim_id=simid, gentrx_gauge_name="simulation_share").set(gentrx_share)
+    g.labels(wallet=wallet_addr, netuid=netuid, sim_id=simid, gentrx_gauge_name="active_miners").set(active_miners)
+
+    ms = self.prometheus_gentrx_miner_scores
+    for uid_str, score in gentrx_scores.items():
+        ms.labels(wallet=wallet_addr, netuid=netuid, sim_id=simid, uid=str(uid_str)).set(float(score))
+
+    # Training stats from last aggregation round
+    tr = getattr(self, 'gentrx_training', {}) or {}
+    if tr:
+        t = self.prometheus_gentrx_training
+        lv = dict(wallet=wallet_addr, netuid=netuid, sim_id=simid)
+        for stat, val in (
+            ("loss_before",           tr.get("loss_before")),
+            ("loss_after",            tr.get("loss_after")),
+            ("loss_delta",            (tr["loss_before"] - tr["loss_after"])
+                                      if tr.get("loss_before") is not None and tr.get("loss_after") is not None
+                                      else None),
+            ("n_scored",              tr.get("n_scored")),
+            ("n_accepted",            tr.get("n_accepted")),
+            ("acceptance_rate",       (tr["n_accepted"] / tr["n_scored"])
+                                      if tr.get("n_scored") else None),
+            ("version",               tr.get("version")),
+            ("agg_round",             tr.get("round")),
+            ("rolled_back",           1 if tr.get("rolled_back") else 0),
+            ("rounds_aggregated_total", tr.get("rounds_aggregated_total")),
+            ("rollbacks_total",       tr.get("rollbacks_total")),
+            ("t_score_s",             tr.get("t_score_s")),
+            ("t_aggregate_s",         tr.get("t_aggregate_s")),
+            ("t_total_s",             tr.get("t_total_s")),
+        ):
+            if val is not None:
+                t.labels(**lv, stat=stat).set(float(val))
+
+
 def publish_info(self: ReportingService) -> None:
     """
     Publishes static simulation and validator information metrics
@@ -446,6 +570,7 @@ def publish_info(self: ReportingService) -> None:
     } | self.simulation.fee_policy.to_prom_info()
     self.prometheus_info.labels( wallet=self.wallet.hotkey.ss58_address, netuid=self.config.netuid, sim_id=self.simulation.simulation_id ).info (prometheus_info)
     publish_validator_gauges(self)
+    publish_gentrx_gauges(self)
 
 def _set_if_changed(gauge, value, *labels):
     """
@@ -487,7 +612,20 @@ def _set_if_changed_metric(gauge, value, **labels):
 
 def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
     """
-    Worker function for calculating metrics.
+    Compute per-miner and per-book metrics from a snapshot of validator state.
+
+    Runs in a thread-pool executor to avoid blocking the reporting event loop.
+
+    Args:
+        validator_data (Dict): Snapshot of validator state including volume sums,
+            inventory history, realized P&L, activity/pnl factors, kappa values,
+            scores, and simulation config.
+        state_data (Dict): Current simulator state containing accounts, books,
+            and notices.
+
+    Returns:
+        Dict: Result dict with keys 'metrics' (computed miner/book data),
+            'updated_stats' (unused), and 'error' (str or None on failure).
     """
     result = {
         'metrics': {},
@@ -666,9 +804,10 @@ def report_worker(validator_data: Dict, state_data: Dict) -> Dict:
                 'kappa_score': kappa_values.get('score') if kappa_values else None,
                 'pnl_score': kappa_values.get('pnl_score') if kappa_values else None,
                 'combined_score': kappa_values.get('final_score') if kappa_values else None,
-                'unnormalized_score': validator_data['unnormalized_scores'][agentId],
-                'score': scores[agentId].item(),
-                'placement': placements[agentId].item(),
+                'unnormalized_score': validator_data['unnormalized_scores'].get(agentId, 0.0),
+                'score': scores[agentId].item() if agentId < len(scores) else 0.0,
+                'gentrx_score': float(validator_data.get('gentrx_scores', {}).get(agentId, 0.0)),
+                'placement': placements[agentId].item() if agentId < len(placements) else len(scores),
             }
 
         result['metrics'] = {
@@ -923,13 +1062,13 @@ async def report(self: ReportingService) -> None:
             inv_values = list(self.inventory_history[agentId].values())
             start_inventories[agentId] = [i for i in inv_values if len(i) > 0][0]
             last_inventories[agentId] = inv_values[-1]
-            kappa_data[agentId] = self.kappa_values[agentId]
+            kappa_data[agentId] = self.kappa_values.get(agentId)
         bt.logging.debug(f"Pre-extraction complete ({time.time()-extract_start:.4f}s)")
 
         for agentId, accounts in self.last_state.accounts.items():
             initial_balance_publish_status = {bookId: False for bookId in range(self.simulation.book_count)}
             for bookId, account in accounts.items():
-                if agentId in self.initial_balances and self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published[agentId]:
+                if agentId in self.initial_balances and self.initial_balances[agentId][bookId]['BASE'] is not None and not self.initial_balances_published.get(agentId, False):
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['BASE'],
                         wallet_addr, netuid, simid, bookId, agentId, "base_balance_initial"))
                     updates.append((agent_gauges, self.initial_balances[agentId][bookId]['QUOTE'],
@@ -974,8 +1113,8 @@ async def report(self: ReportingService) -> None:
                 updates.append((agent_gauges, daily_volumes[agentId][bookId]['taker'], wallet_addr, netuid, simid, bookId, agentId, "daily_taker_volume"))
                 updates.append((agent_gauges, daily_volumes[agentId][bookId]['self'], wallet_addr, netuid, simid, bookId, agentId, "daily_self_volume"))
                 updates.append((agent_gauges, daily_roundtrip_volumes[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "daily_roundtrip_volume"))
-                updates.append((agent_gauges, self.activity_factors[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "activity_factor"))
-                updates.append((agent_gauges, self.pnl_factors[agentId][bookId], wallet_addr, netuid, simid, bookId, agentId, "pnl_factor"))
+                updates.append((agent_gauges, self.activity_factors.get(agentId, {}).get(bookId, 0.0), wallet_addr, netuid, simid, bookId, agentId, "activity_factor"))
+                updates.append((agent_gauges, self.pnl_factors.get(agentId, {}).get(bookId, 1.0), wallet_addr, netuid, simid, bookId, agentId, "pnl_factor"))
                 if kappas:
                     if kappas['books'][bookId] is not None:
                         updates.append((agent_gauges, kappas['books'][bookId], wallet_addr, netuid, simid, bookId, agentId, "kappa"))
@@ -1103,6 +1242,7 @@ async def report(self: ReportingService) -> None:
 
             updates.append((miner_gauges, m['unnormalized_score'], wallet_addr, netuid, simid, agentId, "unnormalized_score"))
             updates.append((miner_gauges, m['score'], wallet_addr, netuid, simid, agentId, "score"))
+            updates.append((miner_gauges, m['gentrx_score'], wallet_addr, netuid, simid, agentId, "gentrx_score"))
             updates.append((miner_gauges, m['placement'], wallet_addr, netuid, simid, agentId, "placement"))
 
             updates.append((miner_gauges, (self.metagraph.trust[agentId] if len(self.metagraph.trust) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "trust"))
@@ -1110,13 +1250,14 @@ async def report(self: ReportingService) -> None:
             updates.append((miner_gauges, (self.metagraph.incentive[agentId] if len(self.metagraph.incentive) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "incentive"))
             updates.append((miner_gauges, (self.metagraph.emission[agentId] if len(self.metagraph.emission) > agentId else 0.0), wallet_addr, netuid, simid, agentId, "emission"))
 
-            if self.miner_stats[agentId]['requests'] >= 100:
-                updates.append((miner_gauges, self.miner_stats[agentId]['requests'], wallet_addr, netuid, simid, agentId, "requests"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['requests'] - self.miner_stats[agentId]['failures'] - self.miner_stats[agentId]['timeouts'] - self.miner_stats[agentId]['rejections'], wallet_addr, netuid, simid, agentId, "success"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['failures'], wallet_addr, netuid, simid, agentId, "failures"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['timeouts'], wallet_addr, netuid, simid, agentId, "timeouts"))
-                updates.append((miner_gauges, self.miner_stats[agentId]['rejections'], wallet_addr, netuid, simid, agentId, "rejections"))
-                updates.append((miner_gauges, (sum(self.miner_stats[agentId]['call_time']) / len(self.miner_stats[agentId]['call_time']) if len(self.miner_stats[agentId]['call_time']) > 0 else 0), wallet_addr, netuid, simid, agentId, "call_time"))
+            _ms = self.miner_stats.get(agentId)
+            if _ms and _ms['requests'] >= 100:
+                updates.append((miner_gauges, _ms['requests'], wallet_addr, netuid, simid, agentId, "requests"))
+                updates.append((miner_gauges, _ms['requests'] - _ms['failures'] - _ms['timeouts'] - _ms['rejections'], wallet_addr, netuid, simid, agentId, "success"))
+                updates.append((miner_gauges, _ms['failures'], wallet_addr, netuid, simid, agentId, "failures"))
+                updates.append((miner_gauges, _ms['timeouts'], wallet_addr, netuid, simid, agentId, "timeouts"))
+                updates.append((miner_gauges, _ms['rejections'], wallet_addr, netuid, simid, agentId, "rejections"))
+                updates.append((miner_gauges, (sum(_ms['call_time']) / len(_ms['call_time']) if _ms['call_time'] else 0), wallet_addr, netuid, simid, agentId, "call_time"))
                 self.miner_stats[agentId] = {'requests': 0, 'timeouts': 0, 'failures': 0, 'rejections': 0, 'call_time': []}
 
             _set_if_changed_metric(

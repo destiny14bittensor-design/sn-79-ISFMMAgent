@@ -2,6 +2,10 @@
 
 This directory contains tools allowing for the offline testing of miner trading agents against a local instance of the simulation.  Testing is achieved by the use of a "Proxy", which is a descendant of the main taos.im validator class with the Bittensor network functions and requirements removed so as to be run without any other preparations (e.g. localnet subtensor configuration) necessary.  The proxy receives state messages from the simulator and forwards them to agents running on the local machine, parses the instructions returned by agents and submits them to the simulation.  This enables miners to check, debug and evaluate the function and behaviour of their strategies in the base simulated market before deploying to mainnet where they will interact with a simulation having the same background configuration but including of course also the other miner agents.  Agents developed and tested using these tools can be immediately deployed in association with miners on testnet or mainnet.
 
+> **GenTRX testing**: `agents/proxy/run` (default) wires up MinIO, the gradient
+> server, and GenTRX training agents on top of `proxy.py`. Pass `--no-gentrx`
+> for a pure-trading proxy test with no S3 or gradient server.
+
 ## Installation
 
 In order to test agent implementations offline, the simulator must first be installed.  Run the `./install_simulator.sh` script **as root user** in the top directory of this repository to prepare all necessary build tools and dependencies for running the C++ simulator.  Note that this process takes a long time (a couple of hours of Ubuntu 22.04) as cmake and g++ are compiled from source.
@@ -104,6 +108,28 @@ To test, follow the below procedure:
 ```
 
 You should observe logs from the proxy indicating start of the simulation, receipt of state updates and responses from agents.   The agent logs received data, events and the instructions submitted.  Note that the simulator only starts publishing state updates to the proxy after the grace period (`Simulation.Agents.MultiBookExchangeAgent.gracePeriod`) has elapsed, so will not see state updates arriving immediately on simulation start.
+
+## Automated launcher
+
+For GenTRX or multi-agent proxy tests, the `run` script handles MinIO, config generation, and tmux layout automatically:
+
+```bash
+# GenTRX mode (default) — starts MinIO, gradient server, and training agents
+./agents/proxy/run simulate/trading/run/config/simulation_0.xml
+
+# Trading-only mode — proxy + simulator + agents, no S3 or gradient server
+./agents/proxy/run --no-gentrx simulate/trading/run/config/simulation_0.xml
+```
+
+Tmux layout (GenTRX mode):
+
+| Window | Panes |
+|---|---|
+| `minio` | MinIO logs |
+| `proxy-sim` | proxy.py (left) \| taosim (right) |
+| `grad-agents` | gradient server (top) \| one pane per agent (below) |
+
+Stop: `tmux kill-session -t proxy_test`
 
 ## Deployment
 

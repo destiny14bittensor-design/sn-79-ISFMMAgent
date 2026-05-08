@@ -35,6 +35,28 @@
 
 //-------------------------------------------------------------------------
 
+namespace
+{
+
+void printProgress(size_t cur, size_t tot, std::string_view label)
+{
+    constexpr int W = 30;
+    const int filled = tot > 0 ? static_cast<int>(W * cur / tot) : 0;
+    const std::string bar =
+        std::string(filled > 0 ? filled - 1 : 0, '=')
+        + (filled > 0 ? ">" : "")
+        + std::string(W - filled, ' ');
+    fmt::print(
+        "\r  {:<20} [{}] {:>3}%  {}/{}",
+        label, bar, tot > 0 ? 100 * cur / tot : 0, cur, tot);
+    std::fflush(stdout);
+    if (cur == tot) fmt::println("");
+}
+
+}  // namespace
+
+//-------------------------------------------------------------------------
+
 namespace taosim::simulation
 {
 
@@ -655,15 +677,14 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(
 
     mngr->setupLogDir(node, baseDir);
 
-    mngr->m_simulations =
-        views::iota(0u, mngr->m_blockInfo.count)
-        | views::transform([&](auto blockIdx) {
-            auto simulation = std::make_unique<Simulation>(
-                blockIdx, mngr->m_blockInfo.dimension, mngr->m_logDir);
-            simulation->configure(node);
-            return simulation;
-        })
-        | ranges::to<std::vector>;
+    mngr->m_simulations.reserve(mngr->m_blockInfo.count);
+    for (size_t blockIdx = 0; blockIdx < mngr->m_blockInfo.count; ++blockIdx) {
+        auto simulation = std::make_unique<Simulation>(
+            blockIdx, mngr->m_blockInfo.dimension, mngr->m_logDir);
+        simulation->configure(node);
+        mngr->m_simulations.push_back(std::move(simulation));
+        printProgress(blockIdx + 1, mngr->m_blockInfo.count, "Configuring blocks");
+    }
 
     mngr->m_gracePeriod = node.child("Agents")
         .child("MultiBookExchangeAgent")
@@ -758,12 +779,14 @@ std::unique_ptr<SimulationManager> SimulationManager::fromCheckpoint(
         | ranges::actions::sort([](auto&& lhs, auto&& rhs) {
             return std::stoul(lhs.stem().string()) < std::stoul(rhs.stem().string());
         });
-    for (auto&& ckptFile : blockCkptFilesSorted) {
-        std::ifstream ifs{ckptFile, std::ios::binary};
+    const size_t nBlockFiles = blockCkptFilesSorted.size();
+    for (auto&& [blockFileIdx, ckptFile] : views::enumerate(blockCkptFilesSorted)) {
         const size_t ckptByteSize = fs::file_size(ckptFile);
+        std::ifstream ifs{ckptFile, std::ios::binary};
         std::vector<char> ckptByteBuffer(ckptByteSize);
         ifs.read(ckptByteBuffer.data(), ckptByteSize);
         blockObjHandles.push_back(msgpack::unpack(ckptByteBuffer.data(), ckptByteSize));
+        printProgress(blockFileIdx + 1, nBlockFiles, "Loading blocks");
     }
 
     fmt::println("Checkpoint loaded successfully; initializing simulation...");
@@ -861,11 +884,13 @@ std::unique_ptr<SimulationManager> SimulationManager::fromReplay(const replay::R
     mngr->setupLogDir(node, desc.dir.parent_path());
     mngr->m_simulations = [&] {
         std::vector<std::unique_ptr<Simulation>> res;
+        res.reserve(mngr->m_blockInfo.count);
         for (uint32_t blockIdx{}; blockIdx < mngr->m_blockInfo.count; ++blockIdx) {
             auto simulation = std::make_unique<Simulation>(
                 blockIdx, mngr->m_blockInfo.dimension, mngr->m_logDir, true, desc);
             simulation->configure(node);
             res.push_back(std::move(simulation));
+            printProgress(blockIdx + 1, mngr->m_blockInfo.count, "Configuring blocks");
         }
         return res;
     }();

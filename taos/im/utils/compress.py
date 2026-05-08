@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Payload compression utilities: lz4/zlib/zstd + Base64 encoding for synapse
+data, with parallel batching support via ThreadPoolExecutor.
+"""
 import zstandard as zstd
 import zlib, lz4.frame
 import pybase64
@@ -91,6 +95,23 @@ def decompress(
         return None
 
 def compress_batch(axon_synapses: dict, batch, compressed_books: str, level: int = 1, engine: str = "lz4", version: int = 45) -> dict:
+    """
+    Compress payload fields for a batch of synapse UIDs in place.
+
+    Replaces the accounts, notices, config, and response fields on each synapse
+    with a compressed dict containing 'books' and 'payload' keys.
+
+    Args:
+        axon_synapses (dict): Mapping of UID to synapse objects (mutated in place).
+        batch: Iterable of UIDs in this batch to compress.
+        compressed_books (str): Pre-compressed books blob shared across all UIDs.
+        level (int): Compression level. Defaults to 1.
+        engine (str): Compression engine ('lz4', 'zlib', or 'zstd'). Defaults to 'lz4'.
+        version (int): Protocol version; < 45 uses JSON, >= 45 uses Msgpack. Defaults to 45.
+
+    Returns:
+        dict: The same `axon_synapses` mapping with compressed payloads applied.
+    """
     for uid in batch:
         axon_synapses[uid].books = None
         payload = {
@@ -117,6 +138,20 @@ def batch_compress(
     engine: str = "lz4",
     version: int = 45,
 ) -> dict:
+    """
+    Compress synapse payloads for multiple UID batches in parallel threads.
+
+    Args:
+        axon_synapses (dict): Mapping of UID to synapse objects (mutated in place).
+        compressed_books (str): Pre-compressed books blob shared across all UIDs.
+        batches (list[list[int]]): List of UID batches; one thread per batch.
+        level (int): Compression level. Defaults to 1.
+        engine (str): Compression engine ('lz4', 'zlib', or 'zstd'). Defaults to 'lz4'.
+        version (int): Protocol version; < 45 uses JSON, >= 45 uses Msgpack. Defaults to 45.
+
+    Returns:
+        dict: Merged mapping of all UIDs to their compressed synapse objects.
+    """
     compressed_batches = []
     with ThreadPoolExecutor(max_workers=len(batches)) as pool:
         tasks = [

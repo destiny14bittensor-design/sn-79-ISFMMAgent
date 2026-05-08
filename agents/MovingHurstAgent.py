@@ -8,15 +8,16 @@ import bittensor as bt
 from collections import defaultdict
 from dataclasses import dataclass
 from taos.common.agents import launch
-from taos.im.agents import FinanceSimulationAgent
+from taos.im.agents import RollingWindow
 from taos.im.protocol.events import SimulationEndEvent
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 import uuid  # For generating unique trade IDs
+from taos.im.agents import GenTRXAgent
 
 @dataclass
-class RollingWindow:
+class RollingWindowHurst(RollingWindow):
     """
     Rolling window configuration for price sampling and Hurst exponent estimation.
 
@@ -33,12 +34,8 @@ class RollingWindow:
         - Increase num_windows and samples for advanced mode for more statistical robustness.
         - Adjust lag_min/lag_max depending on expected momentum duration.
     """
-    min: int
-    max: int
     lag_min: int
     lag_max: int
-    samples: int
-    num_windows: int
 
 @dataclass
 class Thresholds:
@@ -87,7 +84,7 @@ class HurstSignals(IntEnum):
     NOISE=4
 
 
-class MovingHurstAgent(FinanceSimulationAgent):
+class MovingHurstAgent(GenTRXAgent):
     """
     Momentum/Mean-Reversion Agent using Hurst exponent.
 
@@ -100,11 +97,17 @@ class MovingHurstAgent(FinanceSimulationAgent):
 
     def initialize(self):
         """Initialize agent configuration, thresholds, rolling windows, and buffers."""
+        # GenTRX is opt-in: only activates when explicitly configured.
+        if not hasattr(self.config, 'gtx_training_enabled'):
+            self.config.gtx_training_enabled = False
+        if not hasattr(self.config, 'gtx_collect_data'):
+            self.config.gtx_collect_data = False
+        super().initialize()
         self.quantity = getattr(self.config, 'quantity', 10.0)
         self.expiry_period = getattr(self.config, 'expiry_period', 120e9)
         self.predKeys = ['Close', 'Timestamp']
 
-        self.rolling_window = RollingWindow(
+        self.rolling_window = RollingWindowHurst(
             min=int(getattr(self.config, 'rolling_window_min', 60)),
             max=int(getattr(self.config, 'rolling_window_max', 1800)),
             lag_min=2,
@@ -242,7 +245,8 @@ class MovingHurstAgent(FinanceSimulationAgent):
         Returns:
             taos.im.protocol.FinanceAgentResponse : The response which will be attached to the synapse for return to the querying validator.
         """
-        response = FinanceAgentResponse(agent_id=self.uid)
+        # GenTRX: data collection + training trigger (runs even when training disabled).
+        response = super().respond(state)
         start = time.time()
 
         for book_id, book in state.books.items():
@@ -365,7 +369,8 @@ class MovingHurstAgent(FinanceSimulationAgent):
 
     def onEnd(self, event:  SimulationEndEvent):
         bt.logging.info(f"[SIMULATION END] Clearing history")
-        self.reset()
+        for validator in list(self.predictors.keys()):
+            self.reset(validator)
 
     def reset(self, validator : str):
         for book_id in self.predictors[validator].keys():

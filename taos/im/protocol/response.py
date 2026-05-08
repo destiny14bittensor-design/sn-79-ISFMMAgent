@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Finance agent response class: wraps miner instruction lists (market/limit orders,
+cancellations) into the AgentResponse synapse format consumed by the validator.
+"""
 import bittensor as bt
 from pydantic import Field
 from typing import Annotated, Union, List

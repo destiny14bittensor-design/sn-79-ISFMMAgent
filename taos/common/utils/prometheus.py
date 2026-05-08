@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Prometheus metrics server wrapper: starts a singleton HTTP server on a configured
+port and exposes a `prometheus` class for server lifecycle management.
+"""
 import os
 import argparse
 import bittensor as bt
@@ -31,15 +35,21 @@ class prometheus:
         start_server: bool = True
     ):
         """
-        Instantiates a global prometheus DB which can be accessed by other processes.
-        Each prometheus DB is designated by a port.
+        Configure or start the global Prometheus metrics server.
+
+        Each server is uniquely identified by its port. If `start_server` is False,
+        the port is recorded for use by an external server (e.g. FastAPI) without
+        starting a dedicated HTTP listener.
+
         Args:
-            config (:obj:`bt.Config`, `optional`, defaults to bt.prometheus.config()):
-                A config namespace object created by calling bt.prometheus.config()
-            port (:obj:`int`, `optional`, defaults to bt.defaults.prometheus.port ):
-                The port to run the prometheus DB on, this uniquely identifies the prometheus DB.
-            level (:obj:`prometheus.level`, `optional`, defaults to bt.defaults.prometheus.level ):
-                Prometheus logging level. If OFF, the prometheus DB is not initialized.
+            config (bt.Config, optional): Bittensor config object. Defaults to
+                the result of `prometheus.config()`.
+            port (int, optional): Port for the Prometheus HTTP server. Overrides
+                `config.prometheus.port` when provided.
+            level (str or prometheus.level, optional): Logging level — 'OFF',
+                'INFO', or 'DEBUG'. Overrides `config.prometheus.level` when provided.
+            start_server (bool): If True, start the built-in HTTP server. If False,
+                configure for use with an external server. Defaults to True.
         """
         if config == None:
             config = prometheus.config()
@@ -72,12 +82,14 @@ class prometheus:
 
     def serve(cls, port, level) -> bool:
         """
-        Starts the prometheus client server on the configured port.
+        Start the Prometheus HTTP server on the given port.
+
         Args:
-            port (:obj:`int`, `optional`, defaults to bt.defaults.prometheus.port ):
-                The port to run the prometheus DB on, this uniquely identifies the prometheus DB.
-            level (:obj:`prometheus.level`, `optional`, defaults to bt.defaults.prometheus.level ):
-                Prometheus logging level. If OFF, the prometheus DB is not initialized.
+            port (int): Port number to bind the server to.
+            level (str): Prometheus logging level name; if 'OFF', the server is not started.
+
+        Returns:
+            bool: Always True.
         """
         if level == prometheus.level.OFF.name:  # If prometheus is off, return true.
             bt.logging.success("Prometheus:".ljust(20) + "<red>OFF</red>")

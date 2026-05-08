@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Legacy Sharpe ratio calculation: unrealized (mark-to-market) and realized
+(round-trip P&L) Sharpe per miner, with parallel batch processing via loky.
+"""
 import os
 import numpy as np
 import traceback

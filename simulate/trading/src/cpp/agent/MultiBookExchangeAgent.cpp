@@ -240,6 +240,13 @@ void MultiBookExchangeAgent::configure(const pugi::xml_node& node)
     Agent::configure(node);
 
     m_config.configure(node);
+    if (simulation()->blockIdx() == 0) {
+        const auto& p = m_config.parameters();
+        fmt::println(
+            "Exchange precision: price={} volume={} base={} quote={} decimals",
+            p.priceIncrementDecimals, p.volumeIncrementDecimals,
+            p.baseIncrementDecimals, p.quoteIncrementDecimals);
+    }
 
     // TODO: This monstrosity should be split up somehow.
     try {

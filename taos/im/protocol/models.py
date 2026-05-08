@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Pydantic models for the intelligent markets simulation: fee policies, order
+enumerations, account structures, and the market simulation configuration.
+"""
 import numpy as np
 from collections.abc import Mapping, Sequence
 from xml.etree.ElementTree import Element
@@ -9,9 +13,7 @@ from enum import IntEnum
 from itertools import accumulate
 from typing import Literal, Any
 from taos.common.protocol import BaseModel
-"""
-Classes representing models of objects occurring within intelligent market simulations are defined here.
-"""
+
 
 class FeeTier(BaseModel):
     volume_required : float
@@ -518,9 +520,13 @@ class Order(BaseModel):
         """
         Method to extract model data from simulation account representation in the format required by the MarketSimulationStateUpdate synapse.
         """
-        return Order.model_construct(order_type="limit", id=json['i'], client_id=json['c'], timestamp=json['t'],
-                     quantity=json['q'], side=json['s'], price=json['p'], 
-                     leverage=json['l'])
+        # Use field-name kwargs (i, c, t, q, s, p, l) rather than aliases.
+        # pydantic v2 model_construct does not resolve aliases; alias kwargs
+        # silently become extra attributes and the short-name fields stay
+        # unset, which breaks model_dump → model_validate round-trips.
+        return Order.model_construct(order_type="limit", i=json['i'], c=json['c'], t=json['t'],
+                     q=json['q'], s=json['s'], p=json['p'],
+                     l=json['l'])
 
 class LevelInfo(BaseModel):
     """
@@ -556,8 +562,8 @@ class LevelInfo(BaseModel):
         if not 'o' in json:
             orders = None
         else:
-            orders = [Order.model_construct(id=order['i'], timestamp=order['t'],quantity=order['q'],side=order['s'],order_type="limit",price=json['p'],leverage=json['l'] if 'l' in json else 0.0) for order in json['o']]
-        return LevelInfo.model_construct(price = json['p'], quantity=json['q'], orders=orders)
+            orders = [Order.model_construct(i=order['i'], t=order['t'], q=order['q'], s=order['s'], order_type="limit", p=json['p'], l=json['l'] if 'l' in json else 0.0) for order in json['o']]
+        return LevelInfo.model_construct(p=json['p'], q=json['q'], o=orders)
 
 class TradeInfo(BaseModel):
     """
@@ -583,11 +589,11 @@ class TradeInfo(BaseModel):
     t : int = Field(alias='timestamp')
     q : float = Field(alias='quantity')
     p : float = Field(alias='price')
-    Ti : int = Field(alias='taker_id')
-    Ta : int = Field(alias='taker_agent_id')
+    Ti : int | None = Field(alias='taker_id', default=None)
+    Ta : int | None = Field(alias='taker_agent_id', default=None)
     Tf : float | None = Field(alias='taker_fee', default=None)
-    Mi : int = Field(alias='maker_id')
-    Ma : int = Field(alias='maker_agent_id')
+    Mi : int | None = Field(alias='maker_id', default=None)
+    Ma : int | None = Field(alias='maker_agent_id', default=None)
     Mf : float | None = Field(alias='maker_fee', default=None)
 
     @property
@@ -652,9 +658,9 @@ class TradeInfo(BaseModel):
         """
         Method to extract model data from simulation event in the format required by the MarketSimulationStateUpdate synapse.
         """
-        return TradeInfo.model_construct(id=json['i'],timestamp=json['t'],quantity=json['q'],side=json['s'],price=json['p'],
-                         taker_agent_id=json['Ta'], taker_id=json['Ti'], maker_agent_id=json['Ma'], maker_id=json['Mi'],
-                         maker_fee=json['Mf'], taker_fee=json['Tf'])
+        return TradeInfo.model_construct(i=json['i'], t=json['t'], q=json['q'], s=json['s'], p=json['p'],
+                         Ta=json['Ta'], Ti=json['Ti'], Ma=json['Ma'], Mi=json['Mi'],
+                         Mf=json['Mf'], Tf=json['Tf'])
 
 class Cancellation(BaseModel):
     """
@@ -705,7 +711,7 @@ class Cancellation(BaseModel):
         """
         Method to extract model data from simulation event in the format required by the MarketSimulationStateUpdate synapse.
         """
-        return Cancellation.model_construct(orderId=json['i'], timestamp=json['t'], price=json['p'], quantity=json['q'])
+        return Cancellation.model_construct(i=json['i'], t=json['t'], p=json['p'], q=json['q'])
 
 class L2Snapshot(BaseModel):
     """
@@ -1934,7 +1940,7 @@ class Balance(BaseModel):
         """
         Method to transform simulator format model to the format required by the MarketSimulationStateUpdate synapse.
         """
-        return Balance.model_construct(currency=currency,total=json['t'],free=json['f'],reserved=json['r'], initial=json['i'])
+        return Balance.model_construct(c=currency, t=json['t'], f=json['f'], r=json['r'], i=json['i'])
 
 class Fees(BaseModel):
     """
@@ -1966,7 +1972,7 @@ class Fees(BaseModel):
         """
         Method to transform simulator format model to the format required by the MarketSimulationStateUpdate synapse.
         """
-        return Fees.model_construct(volume_traded=json['v'],maker_fee_rate=json['m'],taker_fee_rate=json['t'])
+        return Fees.model_construct(v=json['v'], m=json['m'], t=json['t'])
     
 class OrderCurrency(IntEnum):
     """
@@ -2021,7 +2027,7 @@ class Loan(BaseModel):
         """
         Method to transform simulator format model to the format required by the MarketSimulationStateUpdate synapse.
         """
-        return Loan.model_construct(order_id=json['i'],amount=json['a'],currency=OrderCurrency(json['c']),base_collateral=json['bc'],quote_collateral=json['qc'])
+        return Loan.model_construct(i=json['i'], a=json['a'], c=OrderCurrency(json['c']), bc=json['bc'], qc=json['qc'])
     
     def __str__(self):
         return f"{self.amount} {self.currency.name} [COLLAT : {self.base_collateral} BASE | {self.quote_collateral} QUOTE]"
@@ -2315,12 +2321,17 @@ class LazyBook(Book):
             parsed_events = []
             for e in raw_events:
                 ty = e.get("y")
+                # model_validate (not model_construct) here: populate_by_name
+                # is True on the base config, so both short and long keys are
+                # accepted, AND pydantic v2 enforces required fields. Using
+                # model_construct here silently produced malformed objects
+                # whenever the wire dict lacked Ti/Ta/Mi/Ma for trades.
                 if ty == "o":
-                    parsed_events.append(Order.model_construct(**e))
+                    parsed_events.append(Order.model_validate(e))
                 elif ty == "t":
-                    parsed_events.append(TradeInfo.model_construct(**e))
+                    parsed_events.append(TradeInfo.model_validate(e))
                 elif ty == "c":
-                    parsed_events.append(Cancellation.model_construct(**e))
+                    parsed_events.append(Cancellation.model_validate(e))
                 else:
                     parsed_events.append(e)
             self._events = parsed_events

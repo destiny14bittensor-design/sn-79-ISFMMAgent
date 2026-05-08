@@ -17,8 +17,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-
-"""Conversion for weight between chain representation and np.array or torch.Tensor"""
+"""
+Weight conversion utilities: normalise and clamp reward weight tensors, convert
+between float representations and the u16 on-chain encoding.
+"""
 
 import logging
 import typing
@@ -43,13 +45,16 @@ U16_MAX = 65535
 def normalize_max_weight(
     x: Union[NDArray[np.float32], "torch.FloatTensor"], limit: float = 0.1
 ) -> Union[NDArray[np.float32], "torch.FloatTensor"]:
-    """Normalizes the tensor x so that sum(x) = 1 and the max value is not greater than the limit.
+    """
+    Normalise a weight tensor so that sum(x) = 1 and no single entry exceeds `limit`.
+
     Args:
-        x (:obj:`np.float32`): Tensor to be max_value normalized.
-        limit: float: Max value after normalization.
+        x (np.float32 or torch.FloatTensor): Weight tensor to normalise.
+        limit (float): Maximum allowed weight for any single entry after normalisation.
+            Defaults to 0.1.
 
     Returns:
-        y (:obj:`np.float32`): Normalized x tensor.
+        np.float32 or torch.FloatTensor: Normalised weight tensor of the same type as `x`.
     """
     epsilon = 1e-7  # For numerical stability after normalization
 

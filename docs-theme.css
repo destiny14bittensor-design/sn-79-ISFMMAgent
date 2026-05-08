@@ -1,0 +1,274 @@
+/* docs-theme.css — docsify override to match unified style
+ * Temporary and should be linked across projects
+ * 
+ */
+
+/* ── Fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=Audiowide&family=Titillium+Web:wght@300;400;600;700&display=swap');
+
+/* ── Design tokens ── */
+:root {
+  --navy:   #081b3a;
+  --white:  #ffffff;
+  --light:  #f6f9fe;
+  --blue:   #0097d7;
+  --red:    #f21b3f;
+  --green:  #1d9e75;
+  --teal:   #40c8f0;
+  --gold:   #e5c46b;
+
+  /* Derived palette for docsify surfaces */
+  --text-primary: #0e2447;
+  --text-muted:   #4a6080;
+  --text-on-navy: #8aafd4;
+  --rule:         #e1e8f2;
+  --code-bg:      #f1f4fa;
+}
+
+/* ── Global body ── */
+body,
+.markdown-section {
+  font-family: 'Titillium Web', Helvetica, Arial, sans-serif;
+  color: var(--text-primary);
+  background: var(--white);
+  line-height: 1.65;
+}
+
+/* ── Sidebar — navy panel, the brand accent ── */
+.sidebar {
+  background: var(--navy);
+  color: var(--text-on-navy);
+  border-right: 1px solid #0d2348;
+  padding-top: 12px;
+}
+
+.sidebar .app-name-link,
+.sidebar .app-name {
+  font-family: 'Audiowide', sans-serif;
+  color: var(--white);
+  font-size: 18px;
+  letter-spacing: .02em;
+}
+.sidebar .app-name-link span { color: var(--blue); }
+
+/* Group-heading */
+.sidebar > .sidebar-nav > ul > li > p,
+.sidebar > .sidebar-nav > ul > li > strong {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--blue);
+  margin: 18px 14px 6px;
+  display: block;
+}
+
+
+/* Leaf links */
+.sidebar ul li a {
+  color: var(--text-on-navy);
+  font-size: 13px;
+  text-decoration: none;
+  padding: 5px 14px 5px 18px;
+  border-left: 2px solid transparent;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.sidebar ul li a:hover {
+  color: var(--white);
+  background: rgba(0, 151, 215, .07);
+}
+.sidebar ul li.active > a,
+.sidebar ul li a.active {
+  color: var(--blue);
+  border-left-color: var(--blue);
+  background: rgba(0, 151, 215, .08);
+  font-weight: 600;
+}
+
+/* Nested sublist indent */
+.sidebar ul ul { padding-left: 0; }
+.sidebar ul ul li a { padding-left: 26px; }
+
+/* ── Main content area ── */
+.content {
+  background: var(--white);
+}
+
+.markdown-section {
+  max-width: 860px;
+  padding: 40px 32px 80px;
+}
+
+/* Headings — Audiowide for h1/h2, Titillium for h3+ (less shouty) */
+.markdown-section h1,
+.markdown-section h2 {
+  font-family: 'Audiowide', sans-serif;
+  color: var(--navy);
+  line-height: 1.15;
+  letter-spacing: .01em;
+  margin-top: 1.6em;
+  margin-bottom: .6em;
+}
+.markdown-section h1 { font-size: clamp(26px, 3.5vw, 38px); }
+.markdown-section h2 {
+  font-size: clamp(18px, 2.2vw, 24px);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+.markdown-section h3 {
+  font-family: 'Titillium Web', sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--navy);
+  margin-top: 1.6em;
+  margin-bottom: .5em;
+}
+.markdown-section h4,
+.markdown-section h5,
+.markdown-section h6 {
+  font-family: 'Titillium Web', sans-serif;
+  color: var(--text-primary);
+}
+
+.markdown-section p,
+.markdown-section li {
+  color: var(--text-muted);
+  font-size: 15px;
+}
+.markdown-section p strong,
+.markdown-section li strong { color: var(--navy); }
+
+/* Content links */
+.markdown-section a {
+  color: var(--blue);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(0, 151, 215, .3);
+  transition: border-color .1s;
+}
+.markdown-section a:hover {
+  border-bottom-color: var(--blue);
+}
+
+/* Inline code */
+.markdown-section code {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  color: var(--red);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: .92em;
+}
+
+/* Code blocks */
+.markdown-section pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 16px 18px;
+  overflow-x: auto;
+}
+.markdown-section pre > code {
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+/* Blockquote */
+.markdown-section blockquote {
+  border-left: 3px solid var(--blue);
+  background: var(--light);
+  color: var(--text-muted);
+  padding: 12px 18px;
+  margin: 1em 0;
+}
+.markdown-section blockquote p { color: var(--text-muted); }
+
+/* Tables  */
+.markdown-section table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+  margin: 1em 0;
+}
+.markdown-section th {
+  background: var(--light);
+  font-size: 11px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 10px 14px;
+  border: 1px solid var(--rule);
+  text-align: left;
+}
+.markdown-section td {
+  padding: 9px 14px;
+  border: 1px solid var(--rule);
+  color: var(--text-muted);
+  vertical-align: top;
+}
+.markdown-section tr:nth-child(even) td { background: var(--light); }
+
+/* HR */
+.markdown-section hr {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2em 0;
+}
+
+/* Search box (plugin) */
+.sidebar .search {
+  margin: 10px 14px;
+  border: none;
+}
+.sidebar .search input {
+  background: #0d2348;
+  color: var(--white);
+  border: 1px solid #1a3560;
+  padding: 8px 10px;
+  font-size: 13px;
+  border-radius: 2px;
+}
+.sidebar .search input:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+.sidebar .search .clear-button { color: var(--text-on-navy); }
+.sidebar .search .matching-post {
+  background: #0d2348;
+  border-bottom: 1px solid #1a3560;
+}
+.sidebar .search .matching-post a { color: var(--white); }
+.sidebar .search .search-keyword {
+  color: var(--blue);
+  font-style: normal;
+  font-weight: 700;
+}
+
+/* GitHub corner (docsify renders when `repo:` is set) */
+.github-corner svg {
+  fill: var(--navy);
+  color: var(--white);
+}
+
+/* Mobile toggle button */
+.sidebar-toggle {
+  background: var(--navy);
+  color: var(--white);
+}
+.sidebar-toggle .sidebar-toggle-button span {
+  background: var(--blue);
+}
+
+/* Pagination (if plugin added later) */
+.docsify-pagination-container {
+  border-top: 1px solid var(--rule);
+  padding-top: 24px;
+}
+
+/* Responsive tweaks */
+@media (max-width: 900px) {
+  .markdown-section { padding: 28px 22px 60px; }
+}

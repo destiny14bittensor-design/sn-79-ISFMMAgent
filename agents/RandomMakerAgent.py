@@ -1,23 +1,32 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Random market-maker agent: places limit orders at random prices between the
+best bid and ask. Supports GenTRX distributed training via agent params.
+"""
 import bittensor as bt
 from taos.common.agents import launch
-from taos.im.agents import FinanceSimulationAgent, LimitOrderPlacementEvent, OrderCancellationEvent, OrderPlacementEvent, TradeEvent
+from taos.im.agents import LimitOrderPlacementEvent, OrderCancellationEvent, OrderPlacementEvent, TradeEvent
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 
+from taos.im.agents import GenTRXAgent
 import random
 
-"""
-A simple example agent which randomly places limit orders between the best levels of the book.
-"""
-class RandomMakerAgent(FinanceSimulationAgent):
+
+class RandomMakerAgent(GenTRXAgent):
     def initialize(self):
         """
         Initializes properties, variables and quantities that will be used by the agent.
         The fields attached to `self.config` are defined in the launch parameters.
         """
+        # GenTRX is opt-in: only activates when explicitly configured.
+        if not hasattr(self.config, 'gtx_training_enabled'):
+            self.config.gtx_training_enabled = False
+        if not hasattr(self.config, 'gtx_collect_data'):
+            self.config.gtx_collect_data = False
+        super().initialize()
         self.min_quantity = self.config.min_quantity
         self.max_quantity = self.config.max_quantity
         self.min_leverage = self.config.min_leverage if hasattr(self.config, 'min_leverage') else 0.0
@@ -51,8 +60,8 @@ class RandomMakerAgent(FinanceSimulationAgent):
             FinanceAgentResponse: A response object containing the list of 
                 instructions (e.g., limit orders) to submit to the market.
         """
-        # Initialize a response class associated with the current miner
-        response = FinanceAgentResponse(agent_id=self.uid)
+        # GenTRX: data collection + training trigger (runs even when training disabled).
+        response = super().respond(state)
         # Iterate over all the book realizations in the state message
         for book_id, book in state.books.items():
 

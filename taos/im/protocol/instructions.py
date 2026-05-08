@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Finance agent instruction classes: limit/market order placement, order
+cancellation, position closing, and agent reset for the intelligent markets protocol.
+"""
 from pydantic import PositiveFloat, NonNegativeInt, PositiveInt, NonNegativeFloat, Field
 from typing import Literal, Annotated
 from taos.im.protocol.simulator import *
@@ -8,10 +12,6 @@ from taos.im.protocol.models import OrderDirection, STP, TimeInForce, OrderCurre
 
 UInt32 = Annotated[int, Field(ge=0, le=2**32 - 1)]
 
-"""
-Classes representing instructions that may be submitted by miner agents in a intelligent market simulation are defined here.
-"""
-    
 class FinanceAgentInstruction(AgentInstruction):
     """
     Base class representing an instruction submitted by an agent in an intelligent markets simulation.

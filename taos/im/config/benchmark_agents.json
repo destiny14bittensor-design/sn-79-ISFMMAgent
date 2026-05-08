@@ -5,7 +5,13 @@
       "name": "benchmark_0",
       "ip": "13.59.11.82",
       "port": 8200,
-      "hotkey": "5ECK3B8TenJ5eYc5CFLxhYotwn4eRL7ZtNxeKTHrnCZh9HEH"
+      "hotkey": "5ECK3B8TenJ5eYc5CFLxhYotwn4eRL7ZtNxeKTHrnCZh9HEH",
+      "gentrx_bucket": {
+        "endpoint_url": "https://54c1e398b79fefb42485bef8060eb909.r2.cloudflarestorage.com",
+        "bucket_name": "agent-256",
+        "access_key_id": "93bc30f8393637322c68282b67111d02",
+        "secret_access_key": "e0847496d7e080ec1bd7d04d4e0abf370606f9119d3042869eba17df8f79ccf1"
+      }
     }
   ]
 }

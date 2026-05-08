@@ -62,4 +62,4 @@ python -m pip install -U pyopenssl cryptography
 echo "Installing taos"
 python -m pip install -e .
 mkdir -p ~/.taos
-cp -r agents ~/.taos
+cp -r agents ~/.taos/agents

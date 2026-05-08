@@ -7,7 +7,7 @@ name = "taosim"
 version = "0.0.2"
 description = "τaos.im Simulator"
 readme = "README.md"
-requires-python = "==3.10.9"
+requires-python = ">=3.10"
 authors = [{name = "τaos.im"}]
 classifiers = ["Programming Langauge :: Python :: 3"]
 dependencies = [

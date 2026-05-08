@@ -1,23 +1,31 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Random market-taker agent: places market orders at random intervals.
+Supports GenTRX distributed training via agent params.
+"""
 import bittensor as bt
 from taos.common.agents import launch
-from taos.im.agents import FinanceSimulationAgent
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 
+from taos.im.agents import GenTRXAgent
 import random
 
-"""
-A simple example agent which randomly places market orders.
-"""
-class RandomTakerAgent(FinanceSimulationAgent):
+
+class RandomTakerAgent(GenTRXAgent):
     def initialize(self):
         """
         Initialize properties, variables and quantities that will be used by the agent.
         The fields attached to `self.config` are defined in the launch parameters.
         """
+        # GenTRX is opt-in: only activates when explicitly configured.
+        if not hasattr(self.config, 'gtx_training_enabled'):
+            self.config.gtx_training_enabled = False
+        if not hasattr(self.config, 'gtx_collect_data'):
+            self.config.gtx_collect_data = False
+        super().initialize()
         self.min_quantity = self.config.min_quantity
         self.max_quantity = self.config.max_quantity
         self.min_leverage = self.config.min_leverage if hasattr(self.config, 'min_leverage') else 0.0
@@ -51,8 +59,8 @@ class RandomTakerAgent(FinanceSimulationAgent):
             FinanceAgentResponse: A response object containing the list of 
                 instructions (e.g., limit orders) to submit to the market.
         """
-        # Initialize a response class associated with the current miner
-        response = FinanceAgentResponse(agent_id=self.uid)
+        # GenTRX: data collection + training trigger (runs even when training disabled).
+        response = super().respond(state)
         # Iterate over all the book realizations in the state message
         for book_id, book in state.books.items():
             # If we have not set a trade direction for this book, or 100 simulation seconds have elapsed

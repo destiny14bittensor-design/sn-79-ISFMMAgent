@@ -17,6 +17,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+"""
+Intelligent markets miner neuron: serves FinanceAgentResponse synapses in
+response to MarketSimulationStateUpdate queries from the validator.
+"""
 
 if __name__ != "__mp_main__":
     import time
@@ -25,13 +29,94 @@ if __name__ != "__mp_main__":
 
     from taos.common.neurons.miner import BaseMinerNeuron
     from taos.im.protocol import MarketSimulationStateUpdate
+    from taos.im.protocol.gentrx import GenTRXAssignment
 
     class Miner(BaseMinerNeuron):
-        """
-        Miner class implementation for intelligent market simulations.
 
-        Overrides state processing methods to provide the correct signature when attaching axon handlers.
-        """
+        def __init__(self):
+            super().__init__()
+            # GenTRX: attach assignment handler so validators can push training
+            # assignments via dendrite.  Ignored silently by non-GenTRX agents
+            # (forward checks for _pending_assignment attribute before setting).
+            self.axon.attach(
+                forward_fn=self.forward_gentrx_assignment,
+                blacklist_fn=self.blacklist_gentrx_assignment,
+                priority_fn=self.priority_gentrx_assignment,
+            )
+
+            # GenTRX: commit S3 bucket credentials on-chain so validators can
+            # discover where to fetch our gradients. Hard fail if env vars are
+            # set but the chain commitment fails — running without commitment
+            # means the validator can't find us = no point continuing.
+            self._commit_gentrx_bucket()
+
+        def _commit_gentrx_bucket(self) -> None:
+            """Commit GenTRX S3 bucket credentials on-chain.
+
+            Skips silently if GENTRX_AGENT_S3_BUCKET is not set (miner not
+            participating in GenTRX). Hard-fails if commitment fails.
+            """
+            try:
+                from GenTRX.src.chain import BucketInfo, GenTRXChain
+            except ImportError:
+                bt.logging.debug("GenTRX not installed — skipping bucket commitment")
+                return
+
+            bucket_info = BucketInfo.from_env()
+            if bucket_info is None:
+                bt.logging.info(
+                    "GenTRX env vars not set — skipping bucket commitment "
+                    "(miner not participating in GenTRX)"
+                )
+                return
+
+            try:
+                chain = GenTRXChain(self.subtensor, self.config.netuid, self.metagraph)
+                chain.commit_bucket(self.wallet, bucket_info)
+                bt.logging.info(
+                    f"GenTRX bucket committed on-chain: account={bucket_info.account_id}"
+                )
+            except Exception as exc:
+                bt.logging.error(f"GenTRX bucket commitment FAILED: {exc}")
+                raise RuntimeError(
+                    f"GenTRX bucket commit failed — miner cannot be discovered "
+                    f"by validator: {exc}"
+                )
+
+        async def forward_gentrx_assignment(
+            self, synapse: GenTRXAssignment
+        ) -> GenTRXAssignment:
+            """Receive a GenTRX training assignment from the validator."""
+            gtx = getattr(self.agent, "_gtx", None)
+            if gtx is not None:
+                gtx.pending_assignments.append({
+                    "round":         synapse.round,
+                    "model_version": synapse.model_version,
+                    "books":         synapse.books,
+                    "ts_start":      synapse.ts_start,
+                    "ts_end":        synapse.ts_end,
+                    "data":          synapse.data,
+                    "data_source":   synapse.data_source,
+                    "data_endpoint": synapse.data_endpoint,
+                    "data_bucket":   synapse.data_bucket,
+                    "data_access_key": synapse.data_access_key,
+                    "data_secret_key": synapse.data_secret_key,
+                    "validator_uid": synapse.validator_uid,
+                })
+                bt.logging.info(
+                    f"GenTRX assignment received: round={synapse.round}, "
+                    f"books={synapse.books}, data={len(synapse.data)} files"
+                )
+            return synapse
+
+        def blacklist_gentrx_assignment(
+            self, synapse: GenTRXAssignment
+        ) -> typing.Tuple[bool, str]:
+            return self.blacklist(synapse)
+
+        def priority_gentrx_assignment(self, synapse: GenTRXAssignment) -> float:
+            return self.priority(synapse)
+
         async def forward(
             self, synapse: MarketSimulationStateUpdate
         ) -> MarketSimulationStateUpdate:

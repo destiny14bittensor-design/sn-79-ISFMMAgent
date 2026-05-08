@@ -5,18 +5,22 @@
 # Copyright © 2025 Rayleigh Research
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
 
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+"""
+Per-UID reward computation: Kappa-3, P&L, and GenTRX scores combined into
+two-pool (trading + training) reward tensors.
+"""
 
 import time
 import torch
@@ -72,13 +76,13 @@ def calculate_kappa_score(
     Returns:
         float: Kappa score in [0, 1] range
     """
-    # Early exit if no Kappa data for this miner
-    if not kappa_values[uid]:
+    # Early exit if no Kappa data for this miner (also guards new UIDs not yet in the dict)
+    if not kappa_values.get(uid):
         return 0.0
 
     uid_kappa = kappa_values[uid]
     kappas = uid_kappa['books']  # Raw Kappa values per book from kappa_3()
-    
+
     # ===== STEP 1: NORMALIZE KAPPA VALUES =====
     # Maps raw Kappa values to [0, 1] range for fair comparison
     # Normalization allows combining Kappas from different books on a common scale
@@ -86,10 +90,10 @@ def calculate_kappa_score(
     norm_max = config['kappa']['normalization_max']
     norm_range = norm_max - norm_min
     norm_range_inv = 1.0 / norm_range if norm_range != 0 else 0.0
-    
+
     # Normalize kappas per book - keep None for books with insufficient data
     # None indicates the miner hasn't traded enough on that book to calculate reliable Kappa
-    normalized_kappas = {book_id: None for book_id in activity_factors[uid].keys()}
+    normalized_kappas = {book_id: None for book_id in activity_factors.get(uid, {}).keys()}
     
     for book_id, kappa_val in kappas.items():
         if kappa_val is not None:
@@ -199,7 +203,7 @@ def calculate_kappa_score(
     # - 1.0 = neutral (no boost or penalty)
     # - <1.0 = penalty for inactivity (via exponential decay)
     # - >1.0 = boost for high volume (up to 2.0x at volume_cap)
-    activity_factors_uid = activity_factors[uid]
+    activity_factors_uid = activity_factors.get(uid, {b: 0.0 for b in normalized_kappas})
     decay_rate = config['activity'].get('decay_rate', 1.0)
 
     for book_id, roundtrip_volume in miner_roundtrip_volumes.items():
@@ -262,7 +266,7 @@ def calculate_kappa_score(
     # P&L factors boost/penalize Kappa scores based on realized profitability per book
     # This rewards miners who achieve good risk-adjusted returns AND make money
     # Range: 0.0 to (1 + config.kappa.pnl.impact)
-    pnl_factors_uid = pnl_factors[uid]
+    pnl_factors_uid = pnl_factors.get(uid, {b: 1.0 for b in normalized_kappas})
     pnl_impact = config.get('kappa', {}).get('pnl', {}).get('impact', 0.0)
     
     if pnl_impact > 0:
@@ -584,53 +588,74 @@ def calculate_pnl_score(
     return pnl_score
 
 
-def score_uid(validator_data: Dict, uid: int) -> float:
+def _gentrx_rank_normalize(gentrx_scores: Dict) -> Dict[int, float]:
+    """Rank-normalize raw GenTRX gradient scores to [0, 1].
+
+    Maps raw scores (arbitrary range, often negative) to a uniform [0, 1]
+    distribution based on rank among all scored miners this round.
+    Ties get the same rank. Miners not in gentrx_scores are absent from output.
+
+    Returns {uid: normalized_score} where 1.0 = best, 0.0 = worst.
     """
-    Calculates the final combined score for a specific UID.
-    
-    This function orchestrates the complete scoring pipeline by combining:
-    1. Kappa Score: Risk-adjusted returns weighted by activity and P&L factors (per-book)
-    2. P&L Score: Absolute profitability normalized to daily return (aggregate)
-    
-    Scoring Philosophy:
-    -------------------
-    The final score balances two complementary dimensions:
-    
-    KAPPA COMPONENT (measures "HOW WELL" you trade):
-    - Per-book risk-adjusted returns (Kappa-3 metric)
-    - Weighted by per-book activity factors (rewards consistent participation)
-    - Weighted by per-book P&L factors (boosts for profitability)
-    - Aggregated across books with outlier penalty
-    
-    P&L COMPONENT (measures "HOW MUCH" you make):
-    - Total realized profit/loss across all books
-    - Normalized to daily return rate
-    
-    COMBINATION:
-    Final Score = (kappa_weight × kappa_score) + (pnl_weight × pnl_score)
+    if not gentrx_scores:
+        return {}
+
+    # Extract (uid, raw_score) pairs
+    scored = {}
+    for uid_key, entry in gentrx_scores.items():
+        uid_int = int(uid_key) if isinstance(uid_key, str) else uid_key
+        if isinstance(entry, dict):
+            scored[uid_int] = entry.get('score', 0.0)
+        else:
+            scored[uid_int] = float(entry) if entry is not None else 0.0
+
+    if not scored:
+        return {}
+    if len(scored) == 1:
+        uid = next(iter(scored))
+        # Single miner: 1.0 if positive, 0.0 if negative
+        return {uid: 1.0 if scored[uid] > 0 else 0.0}
+
+    # Sort by score ascending — rank 0 = worst, rank N-1 = best
+    sorted_uids = sorted(scored.keys(), key=lambda u: scored[u])
+    n = len(sorted_uids)
+    result = {}
+    for rank, uid in enumerate(sorted_uids):
+        result[uid] = rank / (n - 1)  # [0.0, 1.0]
+    return result
+
+
+def score_uid(validator_data: Dict, uid: int) -> Tuple[float, float]:
+    """
+    Computes the per-UID trading and gentrx scores for the two-pool allocation.
+
+    Two pools, two scores:
+
+    TRADING SCORE = kappa_weight * kappa + pnl_weight * pnl
+        - kappa: per-book risk-adjusted returns (Kappa-3 metric), already
+          weighted by activity and P&L factors and aggregated across books
+        - pnl: aggregate realized P&L normalized to daily return
+        - kappa_weight + pnl_weight must equal 1.0 (validated at init)
+
+    GENTRX SCORE = post-EMA rank-normalized gradient quality
+        - Rank-normalized to [0, 1] across miners scored this round
+        - Per-UID EMA smoothing (alpha=0.1) over rounds
+        - 0 for miners that did not submit gradients this round
+        - Computed only when --scoring.gentrx.simulation_share > 0
+
+    Pool combination, Pareto multiplication, slow EMA, and burn allocation
+    happen downstream in `prepare_weights`. This function returns the raw
+    per-UID inputs for both pools.
 
     Args:
-        validator_data (Dict): Dictionary containing validator state with keys:
-            - kappa_values: Kappa calculation results
-            - activity_factors: Per-book activity factor storage
-            - pnl_factors: Per-book P&L factor storage
-            - roundtrip_volumes: Trading volume history
-            - realized_pnl_history: Realized P&L from completed trades
-            - config: Scoring configuration
-            - simulation_config: Simulation parameters
-            - simulation_timestamp: Current timestamp
-        uid (int): UID of miner being scored
+        validator_data (Dict): Snapshot of validator state used for scoring,
+            including kappa_values, activity_factors, pnl_factors,
+            roundtrip_volumes, realized_pnl_history, config, simulation_config,
+            simulation_timestamp, gentrx_scores, and gentrx_ema.
+        uid (int): UID of the miner to score.
 
     Returns:
-        float: The final combined score for the given UID in [0, 1] range
-        
-    Side Effects:
-        - Updates uid_kappa dict with scoring metadata:
-            - kappa_score: Base Kappa score (if P&L enabled)
-            - pnl_score: P&L score (if enabled, else None)
-            - kappa_weight: Weight applied to Kappa component
-            - pnl_score_weight: Weight applied to P&L component
-            - final_score: Combined final score
+        Tuple[float, float]: (trading_score, gentrx_score), each in [0, 1].
     """
     # Extract required data from validator state
     kappa_values = validator_data['kappa_values']
@@ -660,13 +685,12 @@ def score_uid(validator_data: Dict, uid: int) -> float:
         simulation_timestamp=simulation_timestamp
     )
     
-    # ===== STEP 2: CHECK IF P&L SCORE COMPONENT IS ENABLED =====
+    # ===== STEP 2: P&L COMPONENT =====
     pnl_config = config.get('pnl', {})
     pnl_score_weight = pnl_config.get('weight', 0.0)
-    
+    pnl_score = 0.0
+
     if pnl_score_weight > 0:
-        # P&L SCORE ENABLED: Calculate and combine both components        
-        # Calculate lookback threshold (same as used for Kappa)
         lookback = config['kappa']['lookback']
         publish_interval = simulation_config['publish_interval']
         lookback_threshold = simulation_timestamp - (lookback * publish_interval)
@@ -682,64 +706,65 @@ def score_uid(validator_data: Dict, uid: int) -> float:
             max_inactive_books_ratio=config['max_inactive_books_ratio'],
             config=pnl_config.get('normalization', {})
         )
-        
-        # ===== STEP 3: COMBINE COMPONENTS WITH WEIGHTED AVERAGE =====
-        # Kappa weight is the complement of P&L weight
-        # This ensures weights sum to 1.0
-        kappa_weight = config['kappa'].get('weight', 0.0)
-        
-        # Weighted combination: final = (w_k × kappa) + (w_p × pnl)
-        final_score = (kappa_weight * kappa_score) + (pnl_score_weight * pnl_score)
-        
-        # Safety clamp to [0, 1]
-        final_score = max(0.0, min(1.0, final_score))        
-        if kappa_values[uid]:
-            uid_kappa = kappa_values[uid]
-            uid_kappa['pnl_score'] = pnl_score
-            uid_kappa['kappa_weight'] = kappa_weight
-            uid_kappa['pnl_score_weight'] = pnl_score_weight
-            uid_kappa['final_score'] = final_score
-        
-        bt.logging.trace(
-            f"UID {uid}: Combined score - "
-            f"kappa={kappa_score:.4f} (w={kappa_weight:.2f}), "
-            f"pnl={pnl_score:.4f} (w={pnl_score_weight:.2f}), "
-            f"final={final_score:.4f}"
-        )
-        
-        return final_score
-    else:
-        # P&L SCORE DISABLED: Return Kappa score only
-        if kappa_values[uid]:
-            uid_kappa = kappa_values[uid]
-            uid_kappa['pnl_score'] = None
-            uid_kappa['kappa_weight'] = 1.0
-            uid_kappa['pnl_score_weight'] = 0.0
-            uid_kappa['final_score'] = kappa_score
-        
-        return kappa_score
 
-def score_uids(validator_data: Dict) -> Dict:
+    # ===== STEP 3: GenTRX COMPONENT =====
+    # Computed only when the gentrx pool is funded. Output is the raw
+    # rank-normalized + per-UID EMA-smoothed score in [0, 1]. Pool sizing
+    # (simulation_pool * gentrx_simulation_share * N/N_target) is applied
+    # downstream in prepare_weights.
+    gentrx_config = config.get('gentrx', {})
+    gentrx_sim_share = gentrx_config.get('simulation_share', 0.0)
+    gentrx_score = 0.0
+
+    if gentrx_sim_share > 0:
+        gentrx_scores = validator_data.get('gentrx_scores', {})
+        gentrx_ranked = _gentrx_rank_normalize(gentrx_scores)
+        round_score = gentrx_ranked.get(uid, 0.0)
+        gentrx_ema = validator_data.get('gentrx_ema', {})
+        alpha = gentrx_config.get('ema_alpha', 0.1)
+        prev = gentrx_ema.get(uid, round_score)
+        gentrx_score = alpha * round_score + (1.0 - alpha) * prev
+        gentrx_ema[uid] = gentrx_score
+
+    # ===== STEP 4: TRADING SCORE (kappa + pnl, weighted-sum, clamp) =====
+    # kappa_weight + pnl_weight must sum to 1.0 within the trading pool
+    # (validated at validator init).
+    kappa_weight = config['kappa'].get('weight', 0.0)
+
+    trading_score = (kappa_weight * kappa_score) + (pnl_score_weight * pnl_score)
+    trading_score = max(0.0, min(1.0, trading_score))
+    gentrx_score = max(0.0, min(1.0, gentrx_score))
+
+    if kappa_values.get(uid):
+        uid_kappa = kappa_values[uid]
+        uid_kappa['pnl_score'] = pnl_score if pnl_score_weight > 0 else None
+        uid_kappa['gentrx_score'] = gentrx_score if gentrx_sim_share > 0 else None
+        uid_kappa['kappa_weight'] = kappa_weight
+        uid_kappa['pnl_score_weight'] = pnl_score_weight
+        uid_kappa['gentrx_simulation_share'] = gentrx_sim_share
+        uid_kappa['trading_score'] = trading_score
+        uid_kappa['final_score'] = trading_score
+
+    bt.logging.trace(
+        f"UID {uid}: score - "
+        f"kappa={kappa_score:.4f} (w={kappa_weight:.2f}), "
+        f"pnl={pnl_score:.4f} (w={pnl_score_weight:.2f}), "
+        f"trading={trading_score:.4f}, "
+        f"gentrx={gentrx_score:.4f} (sim_share={gentrx_sim_share:.4f})"
+    )
+
+    return trading_score, gentrx_score
+
+def score_uids(validator_data: Dict) -> Tuple[Dict[int, float], Dict[int, float]]:
     """
-    Calculates the new score value for all UIDs by computing realized Kappa-3 ratios only.
+    Computes per-UID trading and gentrx scores for all UIDs in this round.
 
-    This function orchestrates the Kappa-3 calculation process:
-    1. Extracts realized P&L history (from completed trades)
-    2. Calls kappa_3() or batch_kappa_3() to compute metrics
-    3. Calls score_uid() to combine scores with activity weighting
-
-    Args:
-        validator_data (Dict): Dictionary containing validator state with keys:
-            - kappa_values: Storage for Kappa-3 metrics
-            - realized_pnl_history: Realized P&L from completed trades
-            - config: Scoring configuration (includes min_realized_observations and tau)
-            - uids: List of UIDs to process
-            - deregistered_uids: UIDs pending reset
-            - simulation_config: Simulation parameters
+    Orchestrates the Kappa-3 calculation, then iterates UIDs through
+    `score_uid` to produce the two-pool inputs.
 
     Returns:
-        Dict: Final scores for all UIDs
-            Format: {uid: score}
+        Tuple[Dict[int, float], Dict[int, float]]:
+            (trading_scores, gentrx_scores) keyed by UID, each in [0, 1].
     """
     config = validator_data['config']['scoring']
     uids = validator_data['uids']
@@ -810,11 +835,13 @@ def score_uids(validator_data: Dict) -> Dict:
 
     validator_data['kappa_values'] = kappa_values
 
-    uid_scores = {
-        uid: score_uid(validator_data, uid)
-        for uid in uids
-    }
-    return uid_scores
+    trading_scores: Dict[int, float] = {}
+    gentrx_scores: Dict[int, float] = {}
+    for uid in uids:
+        t, g = score_uid(validator_data, uid)
+        trading_scores[uid] = t
+        gentrx_scores[uid] = g
+    return trading_scores, gentrx_scores
 
 def distribute_rewards(rewards: list, config: Dict) -> torch.FloatTensor:
     """
@@ -841,15 +868,24 @@ def distribute_rewards(rewards: list, config: Dict) -> torch.FloatTensor:
     distributed_rewards = distribution * sorted_rewards
     return torch.gather(distributed_rewards, 0, sorted_indices.argsort())
 
-def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
+def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, torch.FloatTensor, Dict]:
     """
-    Calculate rewards.
+    Calculate per-round trading and gentrx rewards for all UIDs.
+
+    Two-pool architecture:
+    - Trading rewards: kappa+pnl combine, then Pareto sort-multiply
+    - GenTRX rewards:  rank-norm + per-UID EMA, NO Pareto
 
     Args:
-        validator (Validator): Validator instance
+        self (Validator): The intelligent markets simulation validator.
 
     Returns:
-        Tuple[torch.FloatTensor, Dict]: (rewards, updated_data)
+        Tuple[torch.FloatTensor, torch.FloatTensor, Dict, List[int]]:
+            (trading_rewards_pareto, gentrx_rewards, updated_data, all_uids).
+            Both tensors are length-effective_max_uids in UID order.
+            all_uids is returned so the caller uses the same snapshot, not a
+            re-evaluated range that may have grown if the metagraph synced
+            concurrently.
     """
     roundtrip_volumes = self.roundtrip_volumes
     realized_pnl_history = self.realized_pnl_history
@@ -883,6 +919,10 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
                         'max_daily_return': self.config.scoring.pnl.normalization.max_daily_return,
                     }
                 },
+                'gentrx': {
+                    'simulation_share': getattr(getattr(self.config.scoring, 'gentrx', None), 'simulation_share', 0.0) or 0.0,
+                    'ema_alpha': getattr(getattr(self.config.scoring, 'gentrx', None), 'ema_alpha', 0.1) or 0.1,
+                },
                 'activity': {
                     'capital_turnover_cap': self.config.scoring.activity.capital_turnover_cap,
                     'trade_volume_sampling_interval': self.config.scoring.activity.trade_volume_sampling_interval,
@@ -913,19 +953,42 @@ def get_rewards(self: 'Validator') -> Tuple[torch.FloatTensor, Dict]:
         'uids': all_uids,
         'deregistered_uids': self.deregistered_uids,
         'device': self.device,
+        # GenTRX gradient-training scores (empty dict when GenTRX disabled).
+        # Shape: {uid: {"score": float, "accepted": bool, "books": [...]}}
+        'gentrx_scores': (
+            self._gentrx.get_scores()
+            if hasattr(self, '_gentrx') and self._gentrx is not None
+            else {}
+        ),
+        # EMA state for GenTRX score smoothing — persists across rounds on self.
+        'gentrx_ema': getattr(self, '_gentrx_ema', {}),
     }
     
-    uid_scores = score_uids(validator_data)
-    rewards = list(uid_scores.values())
-    distributed_rewards = distribute_rewards(rewards, validator_data['config']).to(self.device)
-    
+    trading_uid_scores, gentrx_uid_scores = score_uids(validator_data)
+
+    # Trading rewards run through Pareto sort-multiply.
+    trading_rewards_list = [trading_uid_scores[uid] for uid in all_uids]
+    distributed_trading = distribute_rewards(
+        trading_rewards_list, validator_data['config']
+    ).to(self.device)
+
+    # GenTRX rewards skip Pareto. Pool sizing happens in prepare_weights.
+    gentrx_rewards = torch.tensor(
+        [gentrx_uid_scores[uid] for uid in all_uids],
+        dtype=torch.float32,
+        device=self.device,
+    )
+
+    # Persist GenTRX per-round EMA state back to validator for next round
+    self._gentrx_ema = validator_data.get('gentrx_ema', {})
+
     updated_data = {
         'kappa_values': validator_data['kappa_values'],
         'activity_factors': validator_data['activity_factors'],
         'pnl_factors': validator_data['pnl_factors']
     }
-    
-    return distributed_rewards, updated_data
+
+    return distributed_trading, gentrx_rewards, updated_data, all_uids
 
 def set_delays(self: 'Validator', synapse_responses: dict[int, MarketSimulationStateUpdate]) -> list[FinanceAgentResponse]:
     """

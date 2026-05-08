@@ -18,7 +18,6 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import os
 import torch
 import argparse
 import bittensor as bt
@@ -144,7 +143,7 @@ def add_im_validator_args(cls, parser):
 
     parser.add_argument(
         "--scoring.kappa.weight",
-        type=int,
+        type=float,
         help="Weight applied to Kappa evaluation in final score calculation",
         default=0.79,
     )
@@ -207,7 +206,7 @@ def add_im_validator_args(cls, parser):
 
     parser.add_argument(
         "--scoring.pnl.weight",
-        type=int,
+        type=float,
         help="Weight applied to Realized PnL evaluation in final score calculation",
         default=0.21,
     )
@@ -232,7 +231,75 @@ def add_im_validator_args(cls, parser):
         help="Cap for daily return ratio.",
         default=1.0,
     )
-    
+
+    parser.add_argument(
+        "--scoring.gentrx.simulation_share",
+        type=float,
+        help="Share of miner rewards reserved for GenTRX gradient submitters. "
+             "The default 0.05 means rewards split 95%% to trading "
+             "(kappa+pnl) and up to 5%% to training, scaled by participation "
+             "(N_active / N_registered_miners). The unused training portion "
+             "returns to trading. When GenTRX is not running, no gradients "
+             "are submitted and 100%% of rewards go to trading regardless "
+             "of this setting.",
+        default=0.05,
+    )
+
+    parser.add_argument(
+        "--scoring.gentrx.ema_alpha",
+        type=float,
+        help="Per-UID EMA alpha applied inside score_uid to smooth the "
+             "rank-normalized gentrx score across rounds before the slow "
+             "validator-level moving average. Smaller = more smoothing.",
+        default=0.1,
+    )
+
+    # ---- GenTRX distributed training ----
+    # GenTRX is now HTTP-only — the gradient server runs as a separate process
+    # (typically a sibling on the same host for single-machine setups, talking
+    # over loopback). All aggregator / scoring / book-distribution tunables
+    # live on the standalone gradient server's CLI; the validator side just
+    # configures how to reach it.
+    parser.add_argument(
+        "--gentrx.enabled",
+        action="store_true",
+        help="Enable GenTRX: push sim state to the gradient server, deliver "
+             "assignments to miners via dendrite, expose scores to weight calc.",
+        default=False,
+    )
+    parser.add_argument(
+        "--gentrx.gradient_server_url",
+        type=str,
+        help="Gradient server base URL (e.g. http://127.0.0.1:8100/gentrx for "
+             "single-machine setups). REQUIRED when --gentrx.enabled is set.",
+        default="",
+    )
+    parser.add_argument(
+        "--gentrx.api_key",
+        type=str,
+        help="Shared secret for validator↔gradient server auth (also "
+             "GENTRX_API_KEY env var). Required when the gradient server "
+             "binds to a non-loopback interface.",
+        default="",
+    )
+    parser.add_argument(
+        "--gentrx.interval",
+        type=int,
+        help="Poll interval in seconds for score polls and round cadence in "
+             "timer mode (blocks_per_round=0). In block-synced mode, round "
+             "cadence is driven by the chain.",
+        default=30,
+    )
+    parser.add_argument(
+        "--gentrx.blocks_per_round",
+        type=int,
+        help="Block-synced round cadence: round = block // blocks_per_round. "
+             "The validator derives the round from the chain and pushes "
+             "POST /gentrx/round to the gradient server — the server itself "
+             "has no block-sync config. Default 25 ≈ 5min at mainnet 12s/block, "
+             "matches the 5min training window. Pass 0 for timer mode (proxy only).",
+        default=25,
+    )
     parser.add_argument(
         "--scoring.activity.trade_volume_sampling_interval",
         type=int,

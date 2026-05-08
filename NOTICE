@@ -1,0 +1,9 @@
+This project contains code and/or libraries that are licensed under the MIT License:
+
+* Microsoft MarS – used for the order-book matching engine in `GenTRX/src/orderbook.py`.
+  License: see `LICENSES/mars_license.txt`.
+
+* Templar – used for distributed-training design references.
+  License: see `LICENSES/templar_license.txt`.
+
+All other code in this repository is licensed under the MIT License.

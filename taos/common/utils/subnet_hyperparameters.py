@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Subnet hyperparameter retrieval: queries the Bittensor chain for per-subnet
+operational settings via the SubnetInfoRuntimeApi.
+"""
 from bittensor import Subtensor
 from dataclasses import dataclass
 from bittensor.utils.balance import fixed_to_float
@@ -113,18 +117,17 @@ def get_subnet_hyperparameters(
         subtensor : Subtensor, netuid: int, block: Optional[int] = None
     ) -> Optional[Union[list, "SubnetHyperparameters"]]:
         """
-        Retrieves the hyperparameters for a specific subnet within the Bittensor network. These hyperparameters define
-            the operational settings and rules governing the subnet's behavior.
+        Retrieve the hyperparameters for a specific subnet from the Bittensor chain.
 
-        Arguments:
-            netuid (int): The network UID of the subnet to query.
-            block (Optional[int]): The blockchain block number for the query.
+        Args:
+            subtensor (Subtensor): Subtensor instance used to query the chain.
+            netuid (int): Network UID of the subnet to query.
+            block (int, optional): Block number at which to query. Defaults to the
+                current block when None.
 
         Returns:
-            The subnet's hyperparameters, or `None` if not available.
-
-        Understanding the hyperparameters is crucial for comprehending how subnets are configured and managed, and how
-            they interact with the network's consensus and incentive mechanisms.
+            SubnetHyperparameters or None: The subnet's hyperparameters, or None if
+                the subnet is not found or the query returns no result.
         """
         result = subtensor.query_runtime_api(
             runtime_api="SubnetInfoRuntimeApi",

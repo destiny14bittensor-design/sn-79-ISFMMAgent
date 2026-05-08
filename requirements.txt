@@ -20,3 +20,15 @@ scikit-learn
 posix-ipc
 zstandard
 aiofiles
+# GenTRX distributed training (optional) only needed when --gentrx.enabled true
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27
+boto3>=1.34
+aiobotocore>=2.9
+transformers>=4.36
+polars>=0.20
+pyarrow>=14.0
+structlog>=23.2
+sortedcontainers>=2.4
+tqdm>=4.66

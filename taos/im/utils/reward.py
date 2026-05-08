@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Account inventory valuation: computes instantaneous total account value
+using best-bid, midquote, or order-book liquidation pricing.
+"""
 
 from typing import Dict
 
@@ -8,12 +12,12 @@ def get_inventory_value(account: Dict, book: Dict, method='midquote') -> float:
     Calculates the instantaneous total value of an account's inventory using the specified method
 
     Args:
-        account (taos.im.protocol.models.Account) : Object representing the state of the account to be evaluated
-        book : Object representing the orderbook with which the account is associated
-        method : String identifier of the method by which the value should be calculated; options are
-            a) `best_bid` : Calculates base currency balance value using only the top level bid price
-            b) `midquote` : Calculates base currency balance value using the midquote price `(bid + ask) / 2`
-            c) `liquidation` : Calculates base currency balance value by evaluating the total amount received if base balance is sold immediately and in isolation into the current book
+        account (Dict): Account state dict with balance, loan, and collateral fields
+            for both base ('bb', 'bl', 'bc') and quote ('qb', 'ql', 'qc') currencies.
+        book (Dict): Order-book state dict with 'a' (asks) and 'b' (bids) level lists.
+        method (str): Pricing method — 'best_bid' uses the top bid price, 'midquote'
+            uses (bid + ask) / 2, 'liquidation' walks the bid side to simulate a
+            market sell. Defaults to 'midquote'.
 
     Returns:
         float: Total inventory value of the account.

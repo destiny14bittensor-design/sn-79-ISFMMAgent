@@ -8,7 +8,7 @@ cd simulate/trading
 if [ ! -d "vcpkg" ]; then
 	git clone https://github.com/microsoft/vcpkg.git
 fi
-cd vcpkg && git reset --hard 83972272512ce4ede5fc3b2ba98f6468b179f192 && cd ..
+cd vcpkg && git reset --hard e140b1fde236eb682b0d47f905e65008a191800f && cd ..
 apt-get install -y curl zip unzip tar make pkg-config autoconf autoconf-archive libcurl4-openssl-dev
 ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 

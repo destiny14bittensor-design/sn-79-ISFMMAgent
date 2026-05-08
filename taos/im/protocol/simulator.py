@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Simulator response models: serialisable agent response and response-batch
+types consumed by the C++ simulator via the validator protocol.
+"""
 from taos.common.protocol import BaseModel
 from typing import Any
-
-"""
-The models required to construct response messages compatible with the validator are defined here.
-"""
 
 class SimulatorAgentResponse(BaseModel):
     """
@@ -44,10 +44,10 @@ class SimulatorResponseBatch(BaseModel):
 
     def __init__(self, responses: list[SimulatorAgentResponse]):
         """
-        Initializes the response batch.
+        Initialise the response batch.
 
         Args:
-        - responses: List of agent responses to be included in the batch.
+            responses (list[SimulatorAgentResponse]): Agent responses to include in the batch.
         """
         instructions = []
         for response in responses:
@@ -57,10 +57,10 @@ class SimulatorResponseBatch(BaseModel):
 
     def serialize(self) -> dict:
         """
-        Serializes the batch of responses into a dictionary format.
+        Serialise the batch of responses into a dictionary format.
 
         Returns:
-        - A dictionary representation of the response batch.
+            dict: Dictionary with a 'responses' key mapping to a list of serialised responses.
         """
         return {
             "responses": [response.serialize() for response in self.responses]

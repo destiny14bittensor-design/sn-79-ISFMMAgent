@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Validator and simulation state persistence: atomic msgpack serialisation to
+disk, designed for use in a ProcessPoolExecutor worker.
+"""
 import os
 import time
 import traceback

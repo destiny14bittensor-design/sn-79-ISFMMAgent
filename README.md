@@ -1,20 +1,25 @@
 <div align="center">
 
-# **τaos** ☯ **‪ي‬n 79**<!-- omit in toc -->
-### **Decentralized Simulation of Automated Trading in Intelligent Markets:** <!-- omit in toc -->
-### **Risk-Averse Agent Optimization** <!-- omit in toc -->
+# **MVTRX** ☯ **‪ي‬N-79**<!-- omit in toc -->
+### **A New Kind of Exchange** <!-- omit in toc -->
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 ---
 
 
-**τaos** operates as a [Bittensor](https://bittensor.com) subnet at netuid 79, where participants are incentivized to produce meaningful contributions using carefully risk-managed algorithms in a large-scale agent-based **s**imulation **o**f **a**utomated **t**rading strategies.
+**MVTRX** is a [Bittensor](https://bittensor.com) subnet (netuid 79) for decentralised market research and AI model training. It comprises three integrated components:
+
+- **τaos** - agent-based simulation of automated trading strategies in intelligent markets, incentivising risk-managed, high-quality market participation
+- **GenTRX** - distributed training of a shared order-book generative model, built on top of τaos simulation data (and future exchange data)
+- **Exchange** *(coming)* - live market data and order routing, extending both components to real venues
 
 [![Website](https://img.shields.io/badge/website-black?logo=googlechrome
-)](https://taos.im)
-[![Whitepaper](https://img.shields.io/badge/whitepaper-white?logo=proton
+)](https://mvtrx.fi)
+[![τaos Whitepaper](https://img.shields.io/badge/whitepaper-white?logo=proton
 )](https://simulate.trading/taos-im-paper)
 [![Dashboard](https://img.shields.io/badge/dashboard-white?logo=grafana
 )](https://taos.simulate.trading)
+[![Simulation Terminal](https://img.shields.io/badge/dashboard-white?logo=grafana
+)](https://mvtrx.simulate.trading)
 [![Discord](https://img.shields.io/badge/discord-black?logo=discord
 )](https://discord.com/channels/799672011265015819/1353733356470276096)
 
@@ -33,6 +38,7 @@
     - [Simulator](#technical-simulator)
     - [Validator](#technical-validator)
     - [Miner](#technical-miner)
+    - [GenTRX](#gentrx-technical)
 3. [Requirements](#requirements)
     - [Validator](#requirements-validator)
     - [Miner](#requirements-miner)
@@ -44,30 +50,44 @@
 6. [Run](#run)
     - [Validator](#run-validator)
     - [Miner](#run-miner)
+7. [GenTRX Distributed Training](#gentrx)
 ---
 
 <div style="page-break-after: always;"></div>
 
 ## Incentive Mechanism <span id="mechanism"><span>
-The incentive mechanism of subnet 79 is designed to promote intelligent, risk-managed trading logic to be applied by agents, in order that we are able to produce valid and valuable datasets mimicing the properties of a variety of different real-world asset classes and market conditions.
+The incentive mechanism described here covers the **τaos simulation** and **GenTRX training** components that are live today. The forthcoming **Exchange** component (live market data and real-venue order routing) will extend both with additional reward dimensions; mechanism details will be published when Exchange enters testnet.
 
-See the [whitepaper](https://simulate.trading/taos-im-paper) for a more detailed exploration of the background, goals and scope of the τaos project.
+For the τaos component: the mechanism is designed to promote intelligent, risk-managed trading logic to be applied by agents, in order that we are able to produce valid and valuable datasets mimicing the properties of a variety of different real-world asset classes and market conditions. See the [whitepaper](https://simulate.trading/taos-im-paper) for a detailed exploration of the background, goals and scope.
+
+**Two reward pools.** Miner rewards are split across two incentive pools that run in parallel:
+
+- **Trading pool** (~95% of rewards by default): scored on kappa and PnL from simulation trading. All registered miners participate.
+- **GenTRX training pool** (~5% by default, set by `--scoring.gentrx.simulation_share` on the validator): scored on gradient quality, assessed each round against held-out order-book data. Scales with active participation - unused training rewards return to the trading pool. Opt-in for both validators and miners; zero impact on trading rewards when not in use.
 
 ### Owner Role <span id="mechanism-owner"><span>
 The subnet owners are tasked with ensuring fair, equitable and correct operation of the subnet mechanisms (as in all other subnets), while also being responsible for the design, refinement, tuning and publishing of the simulation parameters and logic.  This involves consistent monitoring, testing and development to expand the capabilities of the simulator and determine parameters which result in the most useful possible outputs being generated through the subnet's operation.  The owner must also ensure that the metrics utilized in determining miner rewards are chosen such that miners are incentivized to act fairly and in such a way that outputs are of optimal value in research, trading strategy development, market surveillance and other applications.
+
+For the GenTRX component, the owners also operate the canonical **aggregator** (uid 0): a gradient server that evaluates all miner and sibling-validator proposals each round, applies the best-scoring delta to the shared model, and publishes the new checkpoint on-chain for all participants to download.
 
 ### Validator Role <span id="mechanism-validator"><span>
 Validators in the subnet are responsible primarily for maintaining the state of the simulation, and rewarding agents (miners) which achieve the best results over all realizations of the simulated market.  They deploy two components:
 - The C++ simulator, which handles all the computation necessary to simulate asset markets
 - The Python validator, which receives state updates from the simulator, forwards these to miners, submits instructions received in response back to the simulator, and calculates miner scores based on their performance throughout the simulation.
 
+Validators that opt in to **GenTRX** additionally run a gradient server (`GenTRX.src.gradient_server`) that scores miner gradients against held-out data each round and publishes aggregation proposals. They contribute to the training pool scoring alongside the trading pool, and their on-chain weights reflect both components. GenTRX is opt-in - validators that skip it run as pure trading validators with no change to their trading-pool behaviour.
+
 ### Miner Role <span id="mechanism-miner"><span>
 Miners in the subnet function as trading agents in the distributed simulation; their role is to develop and host trading strategies which maximize their average risk-adjusted performance measures over all simulated market realizations, while also maintaining a sufficient level of trading activity.  There are no strict limitations on what strategies are able to be applied, but the simulation parameters and performance evaluation metrics will be continually reviewed, selected and adjusted with the intention of maximizing the utility of the output data, and promoting the use of intelligent, risk-averse and budget-constrained trading logic.
+
+Miners can also opt in to **GenTRX distributed training** by running an agent that subclasses `GenTRXAgent`. Each round, the agent trains the shared model on its assigned slice of sim data, compresses the gradient, and uploads it to a personal S3 bucket. Validators score these gradients and the best delta updates the shared checkpoint. Miners earn from the training pool in addition to the trading pool, with no trade-off: training runs in a background thread concurrently with live trading.
 
 ---
 <div style="page-break-after: always;"></div>
 
 ## Technical Operation <span id="technical"><span>
+The description below covers the τaos simulation and GenTRX training components that are live today. The Exchange component will be described separately when it enters testnet.
+
 The subnet operates at technical level in the first implementation in quite familiar manner for the Bittensor ecosystem.  Validators construct requests containing the simulation state, which results from a series of computations by the simulator, and publishes these requests to miners at a pre-defined interval.  Miners must respond to validator requests within a reasonable timeframe in order for their instructions to be submitted to the simulation for execution.  Scores are calculated in general as a weighted sum of several risk-adjusted performance metrics; although, at least until others are required, only an intraday Kappa-3 ratio is evaluated.  Miners are also required to maintain a certain level of trading volume in order for their risk-adjusted performance score to be allocated in full - this prevents inactive miners from gaining incentives, and aligns with the objective of the project to encourage active automated trading rather than simple buy & hold or other very low-frequency strategies.
 
 In the current approach, a new simulation configuration is intended to be deployed on approximately weekly basis, with each simulation being executed as an independent run where all miner agents begin with the same initial capital allocation.  Multiple runs of a particular configuration may be executed by validators before a new configuration is published, due to varying rate of progression resulting from differing resources deployed by validators. Miner scores are however calculated using a rolling window which is not cleared at the start of a new simulation, so that performance in previous races does still contribute to the miner's overall weighting.  Deregistrations are handled by resetting the account balance and positions of the agent associated with the UID which was newly registered to the configured starting values.
@@ -82,7 +102,9 @@ The simulator is designed to maintain any number of orderbooks simultaneously, e
 The simulator additionally includes implementations of the "background agents" which create the basic conditions of the markets in which distributed agents (miners) trade.  It is the parameterization of the background model which these agents comprise that determines the high-level behaviour of the simulated orderbooks.  The model implemented is based on well-established research in the field; for some background and details see [Chiarella et. al. 2007](https://arxiv.org/abs/0711.3581) and [Vuorenmaa & Wang 2014](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2336772).
 
 ### Validator <span id="technical-validator"><span>
-The validator functions in a sense as a "proxy" which allows the C++ simulator to communicate with participants in the subnet, and handles all the Bittensor-network-related tasks involved in validator operation - authenticating and distributing requests, validating and processing responses, calculating miner scores, setting weights and, ultimately, providing access to the subnet computational resources for external queries.  
+The validator functions in a sense as a "proxy" which allows the C++ simulator to communicate with participants in the subnet, and handles all the Bittensor-network-related tasks involved in validator operation - authenticating and distributing requests, validating and processing responses, calculating miner scores, setting weights and, ultimately, providing access to the subnet computational resources for external queries.
+
+Validators that opt in to GenTRX additionally run a **gradient server** sidecar process. The gradient server decomposes simulation data into per-miner training assignments, collects uploaded gradients, scores them against held-out order-book data, and publishes the best-scoring delta as the new model checkpoint each round. Trading and training scoring are computed in separate pools and merged at weight-setting time.
 
 ### Miner <span id="technical-miner"><span>
 Miners receive state updates from validators, and respond with instructions as to how they would like to modify their positions in the simulated orderbook realizations by placing and cancelling orders.  In this first version of the subnet, state updates are published at a parameterized interval throughout the simulation and miners are only able to submit instructions at each state publishing event - a planned future implementation will allow continuous bidirectional communication of state and instructions, in line with real exchange operation.  The state update includes all L3 messages processed since the last update, so that strategies analysing the most detailed information are still possible to apply, being limited only in the time-scale at which the algorithm is able to act.
@@ -90,6 +112,24 @@ Miners receive state updates from validators, and respond with instructions as t
 While awaiting the validator to request and receive responses from miners, the simulation is paused such that no events are processed during this time; in order to reward efficient computation as well as agent performance, the response time of miners is used to determine the "delay" or "latency" with which their instructions will be processed by the simulator.  Longer response times thus imply more events that may take place before execution of their instructions, requiring realistic effects like price slippage to be accounted for.   This incentivizes miners to be both fast and intelligent in their trading strategy, while also carefully managing their risk across all market state realizations.  
 
 Miner agents are otherwise treated in the simulator on the same footing as the background agents; their instructions are processed as if they would be submitted to a real exchange, with orders being traded or opened on the book in accordance with standard matching rules.  Every agent's orders will interact with those of the background agents and miners - this ensures a proper and full accounting of the performance of the miner, including their market impact.  Since agents actions directly affect the market structure, this must also be considered when making trading decisions.
+
+Miners that opt in to **GenTRX** extend their agent to also train the shared model each round. Training runs in a background thread concurrently with live trading. The agent downloads its assigned data slice, runs a forward/backward pass, compresses the gradient, and uploads it to a personal S3 bucket - all within the round window. A validator-run gradient server fetches and scores the upload; accepted gradients update the shared checkpoint, which the miner downloads at the start of the next round.
+
+### GenTRX Distributed Training <span id="gentrx-technical"><span>
+
+GenTRX adds a second incentive layer on top of τaos trading. Two processes work together each round:
+
+**Validator** — every tick, the validator pushes simulation state to the gradient server (`POST /gentrx/state`). Once enough data has accumulated, it opens a new training round (`POST /gentrx/round`), creates per-miner assignments (book slice + time window), and delivers them to miners via dendrite. It then polls the gradient server for scores (`GET /gentrx/scores`) and merges them into its weight vector at weight-setting time alongside the trading-pool scores.
+
+**Gradient server** (`run_gradients.sh` or `GenTRX.src.gradient_server`) — a standalone sidecar process that:
+- Replays incoming state ticks through an internal matching engine, accumulates order-book rows, and flushes parquet training files to the validator's S3 bucket
+- Reads uploaded miner gradients from per-miner S3 buckets (discovered via chain commitments), double-scores each against both the miner's own assigned data and held-out validation books, applies an overfit penalty when own-data loss runs ahead of held-out loss, and rank-normalises with per-UID EMA
+- Locally aggregates accepted gradients into a delta and publishes it to S3 as a proposal; the canonical aggregator (uid 0) evaluates all validator proposals and publishes the winning checkpoint
+- On simulation end (`ESE` marker), automatically wipes the stale parquet data from S3 so the next simulation starts clean, without operator intervention
+
+The gradient server can run on the same host as the validator (loopback, no API key needed) or on a dedicated GPU machine (`--bind 0.0.0.0`, shared API key). `run_gradients.sh` handles dependency installation, CUDA detection, pm2 lifecycle, and interactive credential setup. `run_validator.sh -G` orchestrates the full stack in one command.
+
+**Two-pool scoring**: miner weights are a blend of a trading-pool score (kappa + PnL, ~95%) and a training-pool score (gradient quality, ~5%). Each pool is computed independently and merged at weight-setting time. Validators not participating in GenTRX contribute 100% to the trading pool; the training allocation scales with active participation and returns to trading when unused. The pool split is controlled by `--scoring.gentrx.simulation_share` on the validator.
 
 ---
 <div style="page-break-after: always;"></div>
@@ -107,8 +147,12 @@ Validators need to host the C++ simulator as well as the Python validator.  In t
 
 We hope to increase both major parameters significantly so that validators may wish to prepare a larger machine for easier expansion.  It should be noted however that increasing the CPU resources available will result in a faster progression of simulations due to multi-threaded processing of the orderbook realizations.  This should not inherently be a problem, but may cause divergences in scoring if there is a major discrepancy in resources with the other validators in the subnet.  We plan to communicate the setup employed by our validator whenever changes are made, and will enable to configure the resources allocated for simulation processing if necessary.
 
+**GenTRX (optional):** Validators that opt in to distributed training additionally require a GPU (NVIDIA 8-16 GB VRAM) for the gradient server process. See [`doc/gentrx/validator_setup.md`](doc/gentrx/validator_setup.md).
+
 ### Miner <span id="requirements-miner"><span>
 There are no set requirements for miners except that the basic Bittensor package and subnet miner tools occupy ~1GB of RAM per miner instance; resources needed will depend on the complexity and efficiency of the specific strategy implementation.
+
+**GenTRX (optional):** Miners that participate in distributed model training additionally benefit from a GPU (NVIDIA 6-8 GB VRAM minimum). CPU-only training is supported but may miss round deadlines. See [`doc/gentrx/miner_setup.md`](doc/gentrx/miner_setup.md).
 
 ---
 
@@ -116,6 +160,8 @@ There are no set requirements for miners except that the basic Bittensor package
 In order to separate the basic network logic from the actual trading logic and allow to easily switch between different strategies, miners in this subnet define a separate class containing the agent logic which is referenced in the configuration of the miner and loaded for handling of simulation state updates.  Some simple example agents are provided in the `agents` directory of this repository, and are copied to a directory `~/.taos/agents` if using the miner install script to prepare your environment.  The objective in agent development is to produce logic which maximizes performance over all realizations in terms of the evaluation metrics applied by the validators.  Currently assessment is based on an intraday Kappa-3 ratio in conjunction with a requirement to maintain a certain level of cumulative round-trip volume; this will be continuously monitored and reviewed, and other relevant risk-adjusted performance measures incorporated if a need is observed.
 
 Only some basic agents are immediately included as examples, designed to illustrate the fundamentals of reading the state updates and creating instructions.  We expect miners to develop their own custom logic in order to compete in the subnet, but plan to release additional examples, tools and templates to facilitate implementation of certain common classes of trading strategies.  An overview of the information needed to begin developing strategies is provided [here](agents/README.md).  It is also possible to test agents offline against the background model on your local machine by following [these instructions](agents/proxy/README.md).
+
+Miners participating in GenTRX distributed training define their agent by subclassing `GenTRXAgent`, which adds data collection, gradient compression, and S3 upload alongside the standard trading loop.  Example GenTRX-capable agents (`HybridTrainingAgent`, `RandomMakerTrainingAgent`, `RandomTakerTrainingAgent`) are included in the `agents` directory as starting points.  A guide to overriding the training hooks (`collect_row`, `select_training_files`, `train`) is provided in [`doc/gentrx/integration.md`](doc/gentrx/integration.md).
 
 ---
 <div style="page-break-after: always;"></div>
@@ -153,6 +199,8 @@ This will install the following tools:
 
 You can of course modify the install script if you wish to make changes to the installation, or use this as a guide to execute the steps by hand if you prefer.  Note that the installation process takes quite a long time, often 2+ hours on Ubuntu 22.04, due to the need to compile specific cmake and g++ versions from source, so recommended to run in a multiplexer (e.g. screen/tmux) to prevent interruptions.
 
+**GenTRX (optional):** The install script does not include GPU/CUDA driver setup. If you intend to run the gradient server, install NVIDIA drivers and CUDA beforehand (a standard step on most GPU cloud instances). All GenTRX Python dependencies (`fastapi`, `uvicorn`, `httpx`, `boto3`, `transformers`, etc.) are included in `requirements.txt` and installed automatically by `pip install -e .`. The gradient server process is started automatically by `run_validator.sh -G`. Full setup guide: [`doc/gentrx/validator_setup.md`](doc/gentrx/validator_setup.md).
+
 <div style="page-break-after: always;"></div>
 
 ### Miner <span id="install-miner"><span>
@@ -169,6 +217,8 @@ This will install the following tools:
 - **Python 3.10.9** : Fully tested version, others may work but have not been tested
 - **τaos** : The Python component of the apparatus, containing the base validator and miner logic.
 
+**GenTRX (optional):** All GenTRX Python dependencies are included in `requirements.txt` and installed automatically by the above script. If you intend to train with GPU, install NVIDIA drivers and CUDA beforehand. Full setup guide: [`doc/gentrx/miner_setup.md`](doc/gentrx/miner_setup.md).
+
 ---
 <div style="page-break-after: always;"></div>
 
@@ -177,82 +227,167 @@ We include simple shell scripts to facilitate running of a validator or miner; i
 If you wish to use the run scripts, first enter the directory where you have cloned this repo.  You will of course also need to register the hotkey with which you wish to mine/validate on the subnet.
 
 ### Validator <span id="run-validator"><span>
-To run a validator, you can use the provided `run_validator.sh` which accepts the following arguments:
-- `-e` : The subtensor endpoint to which you will connect (default=`wss://entrypoint-finney.opentensor.ai:443`)
-- `-p` : The path where your wallets are stored (default=`~/.bittensor/wallets/`)
-- `-w` : The name of your coldkey (default=`taos`)
-- `-h` : The name of your hotkey (default=`validator`)
-- `-l` : Logging level for the validator, must be one of `error`, `warning`, `info`, `debug`, `trace` (default=`info`)
-- `-d` : Pagerduty integration key; if you have a Pagerduty subscription, this allows to trigger alerts for critical failure scenarios (default=`""`)
-- `-o` : Port on which Prometheus metrics will be published.  If you use a different port than the default, please let us know so that your data will still appear at [taos.simulate.trading](https://taos.simulate.trading/?orgId=1) (default=`9001`).
-- `-t` : Timeout for miner queries; this allows validators to tune the time allowed for miners to respond to account for differences in server geolocation or networking capability (default=`3.0`).
-- `-s` : Flag to indicate that the simulator should not be restarted when performing the update; this allows to easily execute updates which only affect the Python validator operation (default=`0`; append `-s 1` to command to preserve running simulator during update).
-- `-x` : Flag to indicate if wanting to launch tmux session for monitoring (default=`1`; append `-x 0` to command to disable tmux session creation).
-- `-c` : If you wish to resume a previous simulation rather than starting a new one, you can set this argument to the location of the output directory of the simulation, or to `latest` to resume the most recently started simulation. (default=`0` => start a new simulation)
+To run a validator, use the provided `run_validator.sh`:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-e` | Subtensor endpoint | `wss://entrypoint-finney.opentensor.ai:443` |
+| `-p` | Wallet directory | `~/.bittensor/wallets/` |
+| `-w` | Coldkey name | `taos` |
+| `-h` | Hotkey name | `validator` |
+| `-u` | Netuid | `79` |
+| `-l` | Log level (`error`/`warning`/`info`/`debug`/`trace`) | `info` |
+| `-d` | PagerDuty integration key | `""` |
+| `-o` | Prometheus metrics port | `9001` |
+| `-t` | Miner query timeout (seconds) | `3.0` |
+| `-s` | Preserve simulator on update (`-s 1` to keep running) | `0` |
+| `-x` | Launch tmux monitoring session (`-x 0` to disable) | `1` |
+| `-c` | Resume simulation from checkpoint path or `latest` | `0` |
+| `-G` | Enable GenTRX distributed training | *(disabled)* |
+| `-Q` | Gradient server URL - skip auto-start and use this address (e.g. for a remote GPU machine) | *(auto)* |
 
 The script will:
 1. Pull and install the latest changes from the taos repository
 2. Build the latest version of the simulator
-3. Launch a validator under pm2 management as `validator` with the specified parameters
+3. Launch a validator under pm2 management as `validator`
 4. Start the simulator under pm2 management as `simulator`
 5. Save the pm2 process list and configure for resurrection on restart
-6. Open a `tmux` session with the logs for validator and simulator displayed in separate panes (if not disabled).
+6. Open a `tmux` session with logs for validator and simulator (and gradient server logs if it is managed locally)
 
-Example run command:
+**Standard run:**
+```bash
+./run_validator.sh -w taos -h validator -u 79
 ```
-./run_validator.sh -e finney -p ~/.bittensor/wallets -w taos -h validator -u 79
+
+**With GenTRX distributed training** (see [§GenTRX](#gentrx)):
+```bash
+./run_validator.sh -G -w taos -h validator -u 79
 ```
+On first run with `-G`: prompts for your R2/Hippius bucket credentials, detects a local GPU and starts the gradient server automatically (or guides you through connecting a remote GPU machine), and saves all configuration to `.env`. Subsequent runs restore saved config with no flags needed. Pass `-Q <url>` to point at an already-running gradient server without auto-starting one. Full setup guide: [`doc/gentrx/validator_setup.md`](doc/gentrx/validator_setup.md).
+
+**Running the gradient server on a separate GPU machine** (or locally but managed independently):
+
+Use the standalone `run_gradients.sh` script on the GPU host, then connect the validator to it with `-Q`:
+
+```bash
+# On the GPU machine — first run prompts for S3 credentials and API key,
+# subsequent runs skip all prompts and restart the server.
+./run_gradients.sh -G 
+
+# On the validator host
+./run_validator.sh -Q http://<gpu-host>:8100/gentrx -w taos -h validator -u 79
+```
+
+`run_gradients.sh` handles dependency installation (`git pull` + `pip install`), CUDA detection, pm2 process management, and opens a `gentrx` tmux session (htop / GPU monitor / logs). Key flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-G`/`-m` | Run mode (sibling: score + propose) | `sibling` |
+| `-b` | Bind address (`0.0.0.0` for remote access) | `127.0.0.1` |
+| `-p` | Listen port | `8100` |
+| `-e` | Subtensor endpoint | finney |
+| `-u` | Netuid | `79` |
+| `-k` | API key (required when `-b 0.0.0.0`) | *(wizard)* |
+
+All credentials and configuration are saved to `.env` on first run so that `run_validator.sh` picks them up automatically on the same machine.
 
 **We recommend running as root to avoid any permissions issues.**
 
-To resume from a checkpoint, replace the last line with:
-```
-../build/src/cpp/taosim -c $CHECKPOINT
-```
-To resume the latest simulation from a checkpoint, us `-c latest`, or pass the log directory for the simulation e.g.
-```
-../build/src/cpp/taosim -c /root/sn-79/simulate/trading/run/logs/YYYYMMDD_HHmmss
+To resume the validator from a simulation checkpoint, pass `-c latest` (most recent) or a log directory path:
+```bash
+./run_validator.sh -c latest -w taos -h validator -u 79
 ```
 
 <div style="page-break-after: always;"></div>
 
 ### Miner <span id="run-miner"><span>
-To run a miner, you can use the provided `run_miner.sh` which accepts the following arguments:
+To run a miner, use the provided `run_miner.sh`:
 
-- `-e` : The subtensor endpoint to which you will connect (default=`wss://entrypoint-finney.opentensor.ai:443`)
-- `-p` : The path where your wallets are stored (default=`~/.bittensor/wallets/`)
-- `-w` : The name of your coldkey (default=`taos`)
-- `-h` : The name of your hotkey (default=`miner`)
-- `-u` : Netuid on which to serve the miner, for testing with localnet or testnet (default=`79`)
-- `-a` : The port on which to serve the miner axon (default=`8091`)
-- `-g` : The path at which your agent definition files are stored (default=`~/.taos/agents`)
-- `-n` : The name of the file (and class) in the directory specified by `-g` of the agent logic which this miner will use (default=`SimpleRegressorAgent`)
-- `-m` : Parameters for the active agent in the format `param_1=x param_2=y ..` (default=`min_quantity=0.1 max_quantity=1.0 expiry_period=200 model=PassiveAggressiveRegressor signal_threshold=0.0025`)
-- `-l` : Logging level for the miner, must be one of `error`, `warning`, `info`, `debug`, `trace` (default=`info`) 
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-e` | Subtensor endpoint | `wss://entrypoint-finney.opentensor.ai:443` |
+| `-p` | Wallet directory | `~/.bittensor/wallets/` |
+| `-w` | Coldkey name | `taos` |
+| `-h` | Hotkey name | `miner` |
+| `-u` | Netuid | `79` |
+| `-a` | Axon port | `8091` |
+| `-g` | Agent directory | `~/.taos/agents` |
+| `-n` | Agent class name | `SimpleRegressorAgent` |
+| `-m` | Agent params (`param=val ...`) | *(SimpleRegressorAgent defaults)* |
+| `-l` | Log level (`error`/`warning`/`info`/`debug`/`trace`) | `info` |
+| `-G` | Enable GenTRX distributed training | *(disabled)* |
+| `-t` | GenTRX training params to override (`gtx_key=val ...`) | *(defaults)* |
+
 The script will:
 1. Pull and install the latest changes from the taos repository
-2. Launch a miner under pm2 management as `miner` with the specified parameters
+2. Launch a miner under pm2 management as `miner`
 3. Save the pm2 process list and configure for resurrection on restart
-4. Display the logs of the running miner.
+4. Display the logs of the running miner (and training log if GenTRX enabled)
 
-Example run command:
-```
-./run_miner.sh -e finney -p ~/.bittensor/wallets/ -w taos -h miner -u 79
+**Standard run:**
+```bash
+./run_miner.sh -w taos -h miner -u 79 -a 8091
 ```
 
-To run manually without pm2, you can use the following commands from inside the repo directory:
-```console
+**With GenTRX distributed training** (see [§GenTRX](#gentrx)):
+```bash
+./run_miner.sh -G -w taos -h miner -u 79 -a 8091
+```
+On first run with `-G`: prompts for your R2/Hippius bucket credentials, commits the read key on-chain, and saves all configuration to `.env`. It prints a complete reusable command at the end - useful as a template when running multiple UIDs (adjust `-w`/`-h`/`-a`). Subsequent runs restore saved config with no flags needed. To override training params without changing saved config: `./run_miner.sh -t "gtx_train_steps=100 gtx_train_batch_size=8"`. The default agent is `HybridTrainingAgent` - a template, not a finished strategy; tune before deploying seriously. Full setup guide: [`doc/gentrx/miner_setup.md`](doc/gentrx/miner_setup.md).
+
+To run manually without pm2:
+```bash
 cd taos/im/neurons
-python miner.py  --netuid 79 \
---subtensor.chain_endpoint $ENDPOINT \
---wallet.path $WALLET_PATH \
---wallet.name $WALLET_NAME \
---wallet.hotkey $HOTKEY_NAME \
---axon.port $AXON_PORT \
---logging.debug \
---agent.path $AGENT_PATH \
---agent.name $AGENT_NAME \
- --agent.params $AGENT_PARAMS
+python miner.py --netuid 79 \
+  --subtensor.chain_endpoint $ENDPOINT \
+  --wallet.path $WALLET_PATH \
+  --wallet.name $WALLET_NAME \
+  --wallet.hotkey $HOTKEY_NAME \
+  --axon.port $AXON_PORT \
+  --logging.debug \
+  --agent.path $AGENT_PATH \
+  --agent.name $AGENT_NAME \
+  --agent.params $AGENT_PARAMS
 ```
 
 ---
+
+## GenTRX Distributed Training <span id="gentrx"><span>
+
+GenTRX trains a shared order-book generative model (~12M-parameter transformer) on τaos simulation data. Miners compute gradients locally each round and upload compressed deltas; validators score them against held-out data; the canonical checkpoint is published on-chain and available to all participants.
+
+**Rewards:** 5% of miner rewards go to the training pool by default (set by `--scoring.gentrx.simulation_share` on the validator). The remaining 95% stays in the trading pool. The training allocation scales with active participation and returns to trading if no miners opt in. GenTRX is opt-in for both validators and miners - the run scripts for each role handle setup automatically (see [§Validator](#run-validator) and [§Miner](#run-miner) above).
+
+| Resource | Link |
+|---|---|
+| Validator setup | [doc/gentrx/validator_setup.md](doc/gentrx/validator_setup.md) |
+| Miner setup | [doc/gentrx/miner_setup.md](doc/gentrx/miner_setup.md) |
+| Architecture & data flow | [doc/gentrx/overview.md](doc/gentrx/overview.md) |
+| Integration (custom agents) | [doc/gentrx/integration.md](doc/gentrx/integration.md) |
+| Local testing | [doc/gentrx/testing.md](doc/gentrx/testing.md) |
+
+---
+
+## Third-Party Licenses
+
+This project includes components that are distributed under the MIT License:
+
+| Project | File | Link |
+|---------|------|------|
+| Microsoft MarS | `LICENSES/mars_license.txt` | https://github.com/microsoft/MarS |
+| Templar | `LICENSES/templar_license.txt` | https://github.com/tplr-ai/templar |
+
+The primary project license is MIT (see `LICENSES/MIT.txt`). All third-party components are licensed under MIT as well, and their full license texts are provided in the `LICENSES/` directory.
+
+## Acknowledgements
+
+**[Microsoft MarS](https://github.com/microsoft/MarS):** The GenTRX model
+architecture is inspired by MarS, which explored training transformers on
+order book event sequences to model market microstructure. The GenTRX
+implementation is independent original work. The order-book matching engine
+in `GenTRX/src/orderbook.py` is adapted directly from MarS source code
+(MIT license, see `LICENSES/mars_license.txt`).
+
+**[Templar](https://github.com/tplr-ai/templar):** The distributed training
+design references Templar's subnet architecture (MIT license, see
+`LICENSES/templar_license.txt`).

@@ -3,23 +3,30 @@
 import bittensor as bt
 
 from taos.common.agents import launch
-from taos.im.agents import FinanceSimulationAgent
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol.events import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 
+from taos.im.agents import GenTRXAgent
 import random
 
 """
 A simple example agent to demonstrate usage of advanced order options.
+GenTRX distributed training is supported: pass gtx_training_enabled=true in --agent.params to opt in.
 """
-class OrderOptionAgent(FinanceSimulationAgent):
+class OrderOptionAgent(GenTRXAgent):
     def initialize(self):
         """
         Initializes properties, variables and quantities that will be used by the agent.
         The fields attached to `self.config` are defined in the launch parameters.
         """
+        # GenTRX is opt-in: only activates when explicitly configured.
+        if not hasattr(self.config, 'gtx_training_enabled'):
+            self.config.gtx_training_enabled = False
+        if not hasattr(self.config, 'gtx_collect_data'):
+            self.config.gtx_collect_data = False
+        super().initialize()
         self.min_quantity = self.config.min_quantity
         self.max_quantity = self.config.max_quantity
         # Process config flags indicating which tests are to be run
@@ -56,8 +63,8 @@ class OrderOptionAgent(FinanceSimulationAgent):
             FinanceAgentResponse: A response object containing the list of
                 instructions (e.g., limit orders) to submit to the market.
         """
-        # Initialize a response class associated with the current miner
-        response = FinanceAgentResponse(agent_id=self.uid)
+        # GenTRX: data collection + training trigger (runs even when training disabled).
+        response = super().respond(state)
         # Iterate over all the book realizations in the state message
         for book_id, book in state.books.items():
             bid = book.bids[0].price

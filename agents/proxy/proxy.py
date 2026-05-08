@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
 import json
+import logging
 import uvicorn
 import asyncio
 import aiohttp
@@ -13,6 +14,13 @@ import bittensor as bt
 from pathlib import Path
 from threading import Thread
 import traceback
+
+# Ensure GenTRX service logs are visible (uses standard Python logging)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 import posix_ipc
 import mmap
 import msgpack
@@ -29,6 +37,16 @@ from taos.im.validator.reward import set_delays
 
 from ypyjson import YpyObject
 import xml.etree.ElementTree as ET
+
+# GenTRX integration — StatePackager + assignment fetch via GenTRXService
+try:
+    from GenTRX.src.service import GenTRXService
+
+    _GENTRX_AVAILABLE = True
+except ImportError as _e:
+    bt.logging.warning(f"GenTRX not found — disabled ({_e})")
+    _GENTRX_AVAILABLE = False
+
 #--------------------------------------------------------------------------
 
 class Proxy(Validator):
@@ -37,7 +55,7 @@ class Proxy(Validator):
         base_config = copy.deepcopy(BaseNeuron.config())
         self.config = self.config()
         self.config.merge(base_config)
-        self.config.neuron.timeout = config['proxy']['timeout']
+        self.config.neuron.timeout = launcher_config['proxy']['timeout']
         self.check_config(self.config)
         config_file = launcher_config['proxy']['simulation_xml']
         if not os.path.exists(config_file):
@@ -46,8 +64,8 @@ class Proxy(Validator):
         self.simulation_config = self.load_simulation_config()
 
         self.agent_urls = {}
-        port = config['agents']['start_port']
-        for agent, agent_configs in config['agents'].items():
+        port = launcher_config['agents']['start_port']
+        for agent, agent_configs in launcher_config['agents'].items():
             if agent in ['start_port', 'path']: continue
             for agent_config in agent_configs:
                 base_agent_name = f"{agent}_{'_'.join(list([str(a) for a in agent_config['params'].values()]))}"
@@ -61,10 +79,34 @@ class Proxy(Validator):
         self.start_timestamp = None
         self.step = 0
 
+        # GenTRX service — state packaging + assignment delivery
+        self._gentrx = None
+        if _GENTRX_AVAILABLE:
+            grad_url = launcher_config.get("proxy", {}).get("gradient_server_url", "")
+            gs_interval = launcher_config.get("gradient_server", {}).get("interval", 60)
+            n_agents = len(self.agent_urls)
+
+            # Log path: same dir as gradient_server.log
+            gs_log = launcher_config.get("gradient_server", {}).get("log", "")
+            log_path = os.path.join(os.path.dirname(gs_log), "gentrx_service.log") if gs_log else None
+
+            from GenTRX.src.state_packager import StatePackager
+            agent_uids = list(range(n_agents))  # proxy uses sequential 0..n
+            self._gentrx = GenTRXService(
+                packager=StatePackager(),
+                gradient_server_url=grad_url,
+                poll_interval=gs_interval,
+                deliver_fn=self._deliver_gentrx_assignments,
+                miner_uids=agent_uids,
+                log_path=log_path,
+            )
+            bt.logging.info(f"GenTRX service: server={grad_url or 'none'}, poll={gs_interval}s, uids={agent_uids}")
+
         # Add routes for methods receiving input from simulator
         self.router = APIRouter()
         self.router.add_api_route("/orderbook", self.orderbook, methods=["GET"])
         self.router.add_api_route("/account", self.account, methods=["GET"])
+        # Note: scores arrive via data bucket polling (poll_scores), no endpoint needed.
 
     def load_simulation_config(self):
         self.xml_config = ET.parse(self.simulator_config_file).getroot()
@@ -93,10 +135,8 @@ class Proxy(Validator):
                 time.sleep(5)
 
     def onStart(self, timestamp, event : SimulationStartEvent) -> None:
-        """
-        Triggered when start of simulation event is published by simulator.
-        Sets the simulation output directory and retrieves any fundamental price values already written.
-        """
+        """Triggered when start of simulation event is published by simulator.
+        Sets the simulation output directory and compresses prior outputs."""
         bt.logging.info("-"*40)
         bt.logging.info("SIMULATION STARTED")
         self.start_time = time.time()
@@ -126,6 +166,11 @@ class Proxy(Validator):
             state.config.logDir = None
         self.step += 1
         bt.logging.debug(f"STATE : {state}")
+
+        # GenTRX: save state to S3 + deliver assignments to agents
+        if self._gentrx is not None:
+            self._gentrx.push_state(state)
+            await self._gentrx.poll_and_deliver()
 
         # Forward state to agents
         async def query_agent(uid, agent, url, session, json):
@@ -169,6 +214,22 @@ class Proxy(Validator):
         simulator_response = SimulatorResponseBatch(agent_responses).serialize()
         bt.logging.info(f"State update handled ({time.time()-receive_start}s)")
         return simulator_response
+
+    async def _deliver_gentrx_assignments(self, assignments: dict) -> None:
+        """Deliver GenTRX assignments to agents via HTTP POST."""
+        async with aiohttp.ClientSession() as sess:
+            for uid, (agent, agent_url) in enumerate(self.agent_urls.items()):
+                if uid in assignments:
+                    assign_url = agent_url.replace("/handle", "/gentrx/assignment")
+                    try:
+                        await sess.post(
+                            assign_url,
+                            json=assignments[uid],
+                            timeout=aiohttp.ClientTimeout(total=2),
+                        )
+                    except Exception:
+                        pass
+        bt.logging.info(f"GenTRX: delivered to {len(assignments)} agents via HTTP")
 
     async def _listen(self):
         def receive(mq_req) -> dict:

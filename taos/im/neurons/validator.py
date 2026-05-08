@@ -49,6 +49,8 @@ if __name__ != "__mp_main__":
 
     import bittensor as bt
 
+    from GenTRX.src.bt_log import gtx_log
+
     import uvicorn
     from typing import Tuple, Dict, List
     from fastapi import FastAPI, APIRouter
@@ -142,7 +144,7 @@ if __name__ != "__mp_main__":
 
             bt.logging.info(f"Starting query service from: ../validator/query.py")
 
-            core_allocation = get_core_allocation()
+            core_allocation = get_core_allocation(grad_server_cores=int(os.environ.get("GRAD_CORES_COUNT", "0")))
             cmd = [
                 sys.executable,
                 '-u',
@@ -221,7 +223,7 @@ if __name__ != "__mp_main__":
             bt.logging.info(f"Starting reporting service from: ../validator/report.py")
 
             self._reporting = False
-            core_allocation = get_core_allocation()
+            core_allocation = get_core_allocation(grad_server_cores=int(os.environ.get("GRAD_CORES_COUNT", "0")))
             cmd = [
                 sys.executable,
                 '-u',
@@ -475,7 +477,12 @@ if __name__ != "__mp_main__":
                             log_path = Path(output_dir)
                             for log_file in log_path.iterdir():
                                 if log_file.is_file() and log_file.suffix == '.log':
-                                    log_period = log_file.name.split('.')[1]
+                                    _parts = log_file.name.split('.')
+                                    if len(_parts) < 2:
+                                        continue
+                                    log_period = _parts[1]
+                                    if '-' not in log_period:
+                                        continue
                                     if len(log_period) == 13:
                                         log_end = (int(log_period.split('-')[1][:2]) * 3600 + int(log_period.split('-')[1][2:4]) * 60 + int(log_period.split('-')[1][4:])) * 1_000_000_000
                                     else:
@@ -579,25 +586,34 @@ if __name__ != "__mp_main__":
                 Exception: If the simulation config XML file is missing.
             """
             super(Validator, self).__init__(config=config)
-            
-            # Validate scoring weights sum to 1.0
-            scoring_weights = {
-                'kappa': self.config.scoring.kappa.weight,
-                'pnl': self.config.scoring.pnl.weight,
-            }
 
-            total_weight = sum(scoring_weights.values())
-            tolerance = 1e-6  # Allow for floating point precision
+            kappa_w = self.config.scoring.kappa.weight
+            pnl_w = self.config.scoring.pnl.weight
+            gentrx_sim_share = getattr(getattr(self.config.scoring, 'gentrx', None), 'simulation_share', 0.0) or 0.0
+            burn_ratio = getattr(self.config.neuron, 'burn_ratio', 0.0) or 0.0
+            tolerance = 1e-6
 
-            if abs(total_weight - 1.0) > tolerance:
+            trading_sum = kappa_w + pnl_w
+            if abs(trading_sum - 1.0) > tolerance:
                 error_msg = (
-                    f"Scoring weights must sum to 1.0, got {total_weight:.6f}. "
-                    f"Current weights: {scoring_weights}"
+                    f"Trading-pool weights must sum to 1.0, got "
+                    f"kappa={kappa_w:.6f} + pnl={pnl_w:.6f} = {trading_sum:.6f}."
                 )
                 bt.logging.error(error_msg)
                 raise ValueError(error_msg)
 
-            bt.logging.info(f"Scoring weights validated: {scoring_weights} (sum={total_weight:.6f})")
+            if not (0.0 <= gentrx_sim_share <= 1.0):
+                error_msg = (
+                    f"--scoring.gentrx.simulation_share must be in [0, 1], "
+                    f"got {gentrx_sim_share:.6f}."
+                )
+                bt.logging.error(error_msg)
+                raise ValueError(error_msg)
+
+            bt.logging.info(
+                f"Scoring weights validated: trading=(kappa={kappa_w:.4f}, pnl={pnl_w:.4f}), "
+                f"gentrx.simulation_share={gentrx_sim_share:.4f}, burn_ratio={burn_ratio:.4f}"
+            )
 
             # Load the simulator config XML file data in order to make context and parameters accessible for reporting and output location.
             if not os.path.exists(self.config.simulation.xml_config):
@@ -613,7 +629,10 @@ if __name__ != "__mp_main__":
             self.effective_max_uids = self.subnet_info.max_uids + len(self.benchmark_agents)
             self.scores = torch.zeros(
                 self.effective_max_uids, dtype=torch.float32, device=self.device
-            )      
+            )
+            self.gentrx_scores = torch.zeros(
+                self.effective_max_uids, dtype=torch.float32, device=self.device
+            )
             
             self.last_state = None
             self.last_response = None
@@ -628,7 +647,7 @@ if __name__ != "__mp_main__":
 
             self.main_loop = asyncio.new_event_loop()
             self._main_loop_ready = Event()
-            core_allocation = get_core_allocation()
+            core_allocation = get_core_allocation(grad_server_cores=int(os.environ.get("GRAD_CORES_COUNT", "0")))
             ipc_cores = core_allocation['ipc']
             if len(ipc_cores) >= 2:
                 mid = len(ipc_cores) // 2
@@ -695,6 +714,91 @@ if __name__ != "__mp_main__":
             self.router.add_api_route("/orderbook", self.orderbook, methods=["GET"])
             self.router.add_api_route("/account", self.account, methods=["GET"])
 
+            # ---- GenTRX distributed training (optional) ----
+            # Log via the `gtx_log` shim (imported at module top) — forwards
+            # to bt.logging with the `[GTX]` prefix baked in, so every record
+            # surfaces through the same stream the rest of the validator uses.
+            self._gentrx = None
+            _gentrx_enabled = getattr(getattr(self.config, "gentrx", None), "enabled", False)
+            gtx_log.info(f"init: enabled={_gentrx_enabled}")
+            if _gentrx_enabled:
+                try:
+                    from GenTRX.src.service import GenTRXService
+                    # Miner UIDs are computed dynamically — metagraph changes
+                    # over time as miners register/dereg, and miners may not be
+                    # registered yet at validator init.
+                    my_hotkey = self.wallet.hotkey.ss58_address
+
+                    def _current_miner_uids():
+                        uids = [
+                            uid for uid in range(self.metagraph.n)
+                            if self.metagraph.axons[uid].hotkey != my_hotkey
+                            and self.metagraph.axons[uid].ip != "0.0.0.0"
+                            and self.metagraph.axons[uid].port != 0
+                        ]
+                        # Include benchmark agents that have active axons (scored,
+                        # not rewarded — same pattern as trading benchmarks).
+                        for i, agent in enumerate(self.benchmark_agents):
+                            axon = agent['axon']
+                            if axon.ip != "0.0.0.0" and axon.port != 0:
+                                uids.append(self.benchmark_start_uid + i)
+                        return uids
+
+                    gtx_log.info(f"init: server_url={self.config.gentrx.gradient_server_url}, current miner_uids={_current_miner_uids()}")
+
+                    def _get_current_block():
+                        try:
+                            return self.subtensor.get_current_block()
+                        except Exception:
+                            return 0
+
+                    self._gentrx = GenTRXService.from_config(
+                        self.config,
+                        deliver_fn=self._deliver_gentrx_assignments,
+                        miner_uids_fn=_current_miner_uids,
+                        get_block_fn=_get_current_block,
+                        validator_uid=self.uid,
+                    )
+                    if self._gentrx:
+                        if self._gentrx.is_healthy():
+                            gtx_log.info(f"init: gradient server healthy at {self.config.gentrx.gradient_server_url}")
+                        else:
+                            gtx_log.warning(f"init: gradient server unreachable at {self.config.gentrx.gradient_server_url} — will retry on each tick")
+                        # Commit validator bucket read credentials to chain.
+                        # Miners and the aggregator use this to discover the bucket
+                        # (data, scores, checkpoints) without pre-configured env vars.
+                        try:
+                            from GenTRX.src.chain import BucketInfo, GenTRXChain
+                            val_bucket = BucketInfo.from_validator_env()
+                            if val_bucket:
+                                gtx_chain = GenTRXChain(self.subtensor, self.config.netuid, self.metagraph)
+                                gtx_chain.commit_bucket(self.wallet, val_bucket)
+                                gtx_log.info("validator bucket committed to chain")
+                            else:
+                                gtx_log.debug("GENTRX_VALIDATOR_S3_* not set — skipping chain commitment")
+                        except Exception as exc:
+                            gtx_log.warning(f"validator chain commit failed: {exc}")
+                        # Register benchmark miner buckets with the gradient server.
+                        # These miners can't commit to chain (not registered), so the
+                        # validator injects their bucket info via the REST API.
+                        for bm in self.benchmark_agents:
+                            bkt = bm.get('gentrx_bucket')
+                            if bkt:
+                                ok = self._gentrx.register_benchmark_bucket(bm['uid'], bkt)
+                                if ok:
+                                    gtx_log.info(f"registered benchmark bucket: uid={bm['uid']} bucket={bkt.get('bucket_name')}")
+                                else:
+                                    gtx_log.warning(f"failed to register benchmark bucket: uid={bm['uid']}")
+                    else:
+                        gtx_log.warning("init: from_config returned None — check that --gentrx.gradient_server_url is set")
+                except ImportError as exc:
+                    gtx_log.warning(f"init: import failed — {exc}")
+                except Exception as exc:
+                    gtx_log.error(f"init: failed — {exc}")
+                    import traceback
+                    gtx_log.error(traceback.format_exc())
+            gtx_log.info(f"init: {'ACTIVE' if self._gentrx else 'DISABLED'}")
+
             self.repo_path = Path(os.path.dirname(os.path.realpath(__file__))).parent.parent.parent
             self.repo = Repo(self.repo_path)
             self.update_repo()
@@ -718,8 +822,8 @@ if __name__ != "__mp_main__":
                 with open(self.config.benchmark.agents, 'r') as f:
                     benchmark_config = json.load(f)                
                 for idx, agent in enumerate(benchmark_config['agents']):
-                    uid = self.benchmark_start_uid + idx                    
-                    self.benchmark_agents.append({
+                    uid = self.benchmark_start_uid + idx
+                    entry = {
                         'uid': uid,
                         'name': agent['name'],
                         'ip': agent['ip'],
@@ -734,7 +838,10 @@ if __name__ != "__mp_main__":
                             ip_type=self.metagraph.axons[0].ip_type,
                             protocol=self.metagraph.axons[0].protocol,
                         )
-                    })
+                    }
+                    if 'gentrx_bucket' in agent:
+                        entry['gentrx_bucket'] = agent['gentrx_bucket']
+                    self.benchmark_agents.append(entry)
                     bt.logging.info(f"Loaded benchmark agent: {agent['name']} (UID {uid}) at {agent['ip']}:{agent['port']}")            
             except Exception as ex:
                 bt.logging.error(f"Failed to load benchmark agents: {ex}")
@@ -1488,6 +1595,7 @@ if __name__ != "__mp_main__":
                 "simulation_timestamp": self.simulation_timestamp,
                 "hotkeys": self.hotkeys,
                 "scores": [score.item() for score in self.scores],
+                "gentrx_scores": [score.item() for score in self.gentrx_scores],
                 "activity_factors": self.activity_factors,
                 "pnl_factors": self.pnl_factors,
                 "inventory_history": inventory_snapshot,
@@ -2273,7 +2381,7 @@ if __name__ != "__mp_main__":
                     self.scores = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
                     num_scores_to_copy = min(len(loaded_scores), self.effective_max_uids)
                     self.scores[:num_scores_to_copy] = torch.tensor(loaded_scores[:num_scores_to_copy])
-                    
+
                     if len(loaded_scores) > self.effective_max_uids:
                         bt.logging.warning(
                             f"Loaded state has {len(loaded_scores)} scores but current effective_max_uids is {self.effective_max_uids}. "
@@ -2284,6 +2392,12 @@ if __name__ != "__mp_main__":
                             f"Loaded state has {len(loaded_scores)} scores but current effective_max_uids is {self.effective_max_uids}. "
                             f"Initializing scores for UIDs {len(loaded_scores)} onwards as 0.0."
                         )
+
+                    loaded_gentrx = validator_state.get("gentrx_scores")
+                    self.gentrx_scores = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
+                    if loaded_gentrx is not None:
+                        num_g_to_copy = min(len(loaded_gentrx), self.effective_max_uids)
+                        self.gentrx_scores[:num_g_to_copy] = torch.tensor(loaded_gentrx[:num_g_to_copy])
 
                     loaded_activity = validator_state.get("activity_factors", {})
                     if loaded_activity and isinstance(list(loaded_activity.values())[0], float):
@@ -2741,6 +2855,28 @@ if __name__ != "__mp_main__":
                     'shorts': deque()
                 }))
 
+        def get_n_target_miners(self) -> int:
+            """
+            Count registered miner UIDs in the metagraph (validators excluded).
+
+            Used by `prepare_weights` to size the GenTRX pool's participation
+            denominator. A miner is identified by having a reachable axon
+            endpoint and not being the running validator itself.
+            """
+            try:
+                my_hotkey = self.wallet.hotkey.ss58_address
+            except Exception:
+                my_hotkey = None
+            count = 0
+            for uid in range(self.metagraph.n):
+                axon = self.metagraph.axons[uid]
+                if my_hotkey is not None and axon.hotkey == my_hotkey:
+                    continue
+                if axon.ip == "0.0.0.0" or axon.port == 0:
+                    continue
+                count += 1
+            return count
+
         def handle_deregistration(self, uid) -> None:
             """
             Handles deregistration of a validator or miner UID.
@@ -2758,6 +2894,12 @@ if __name__ != "__mp_main__":
             """
             self.deregistered_uids.append(uid)
             self.scores[uid] = 0.0
+            if hasattr(self, 'gentrx_scores'):
+                self.gentrx_scores[uid] = 0.0
+            # Reset per-round GenTRX EMA so new miner at the same UID slot
+            # doesn't inherit the old miner's score history.
+            if hasattr(self, '_gentrx_ema') and self._gentrx_ema:
+                self._gentrx_ema.pop(uid, None)
             bt.logging.debug(f"UID {uid} Deregistered - Scheduled for reset.")
 
         def process_resets(self, state : MarketSimulationStateUpdate) -> None:
@@ -2866,8 +3008,12 @@ if __name__ != "__mp_main__":
                     new_scores = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
                     min_len = min(old_effective_max_uids, self.effective_max_uids)
                     new_scores[:min_len] = self.scores[:min_len]
-                    
                     self.scores = new_scores
+
+                    new_gentrx = torch.zeros(self.effective_max_uids, dtype=torch.float32, device=self.device)
+                    min_len_g = min(old_effective_max_uids, self.effective_max_uids)
+                    new_gentrx[:min_len_g] = self.gentrx_scores[:min_len_g]
+                    self.gentrx_scores = new_gentrx
                     if self.benchmark_agents:
                         bt.logging.info("Updating benchmark agent UIDs...")
                         for idx, agent in enumerate(self.benchmark_agents):
@@ -2904,6 +3050,49 @@ if __name__ != "__mp_main__":
                                 if old_uid < len(self.scores):
                                     self.scores[new_uid] = self.scores[old_uid]
                                     self.scores[old_uid] = 0.0
+                                if old_uid < len(self.gentrx_scores):
+                                    self.gentrx_scores[new_uid] = self.gentrx_scores[old_uid]
+                                    self.gentrx_scores[old_uid] = 0.0
+
+                # Expand per-UID dicts to cover any UIDs not yet present (new network
+                # registrations, or holes left after benchmark shifting above).
+                _bc = self.simulation.book_count
+                _kappa_default = {
+                    'books': {b: None for b in range(_bc)},
+                    'books_weighted': {b: 0.0 for b in range(_bc)},
+                    'total': None, 'average': None, 'median': None,
+                    'normalized_average': 0.0, 'normalized_median': 0.0,
+                    'normalized_total': 0.0,
+                    'activity_weighted_normalized_median': 0.0,
+                    'penalty': 0.0, 'score': 0.0,
+                }
+                for _uid in range(self.effective_max_uids):
+                    if _uid not in self.miner_stats:
+                        self.miner_stats[_uid] = {
+                            'requests': 0, 'timeouts': 0, 'failures': 0,
+                            'rejections': 0, 'call_time': [],
+                        }
+                    if _uid not in self.activity_factors:
+                        self.activity_factors[_uid] = {b: 0.0 for b in range(_bc)}
+                    if _uid not in self.pnl_factors:
+                        self.pnl_factors[_uid] = {b: 1.0 for b in range(_bc)}
+                    if _uid not in self.kappa_values:
+                        self.kappa_values[_uid] = dict(_kappa_default)
+                        self.kappa_values[_uid]['books'] = {b: None for b in range(_bc)}
+                        self.kappa_values[_uid]['books_weighted'] = {b: 0.0 for b in range(_bc)}
+                    if _uid not in self.unnormalized_scores:
+                        self.unnormalized_scores[_uid] = 0.0
+                    if _uid not in self.initial_balances:
+                        self.initial_balances[_uid] = {
+                            b: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
+                            for b in range(_bc)
+                        }
+                    if _uid not in self.initial_balances_published:
+                        self.initial_balances_published[_uid] = False
+                    if _uid not in self.inventory_history:
+                        self.inventory_history[_uid] = {}
+                    if _uid not in self.recent_miner_trades:
+                        self.recent_miner_trades[_uid] = {b: [] for b in range(_bc)}
 
             self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
             bt.logging.success(
@@ -2939,6 +3128,96 @@ if __name__ != "__mp_main__":
                 self.pagerduty_alert(f"Failed to sync: {ex}", details={"trace": traceback.format_exc()})
             finally:
                 self.maintaining = False
+
+        async def _deliver_gentrx_assignments(self, assignments: dict) -> None:
+            """Deliver GenTRX assignments to miners via dendrite."""
+            try:
+                from taos.im.protocol.gentrx import GenTRXAssignment
+
+                my_hotkey = self.wallet.hotkey.ss58_address
+                try:
+                    my_uid = self.metagraph.hotkeys.index(my_hotkey)
+                except ValueError:
+                    my_uid = -1
+                deliveries = []
+                for uid, assignment in assignments.items():
+                    if uid >= len(self.metagraph.axons):
+                        # Benchmark miner — look up axon from config
+                        bm_idx = uid - self.benchmark_start_uid
+                        if bm_idx < 0 or bm_idx >= len(self.benchmark_agents):
+                            continue
+                        axon = self.benchmark_agents[bm_idx]['axon']
+                    else:
+                        axon = self.metagraph.axons[uid]
+                    if axon.hotkey == my_hotkey:
+                        continue  # skip self
+                    if axon.ip == "0.0.0.0" or axon.port == 0:
+                        continue  # skip dead/unserved nodes
+                    try:
+                        deliveries.append((
+                            uid,
+                            axon,
+                            GenTRXAssignment(
+                                round=assignment.get("round", 0),
+                                model_version=assignment.get("model_version", 0),
+                                books=assignment.get("books", []),
+                                ts_start=assignment.get("ts_start", 0),
+                                ts_end=assignment.get("ts_end", 0),
+                                data=assignment.get("data", []),
+                                data_source=assignment.get("data_source", "s3"),
+                                data_endpoint=assignment.get("data_endpoint", ""),
+                                data_bucket=assignment.get("data_bucket", ""),
+                                data_access_key=assignment.get("data_access_key", ""),
+                                data_secret_key=assignment.get("data_secret_key", ""),
+                                validator_uid=my_uid,
+                            ),
+                        ))
+                    except Exception as exc:
+                        gtx_log.warning(f"build assignment for uid {uid} failed: {exc}")
+
+                if not deliveries:
+                    return
+
+                # Single round summary
+                round_id = next(iter(assignments.values())).get("round", "?")
+                gtx_log.info(f"round={round_id}: delivering to uids={[u for u,_,_ in deliveries]}")
+
+                # Use async-native dendrite call (matches taos/im/validator/query.py pattern).
+                # Reuse self.dendrite — creating a new one per call leaks aiohttp sessions
+                # and causes "attached to different loop" on subsequent cycles.
+                send_ok = 0
+                send_fail = 0
+
+                async def _send(uid, axon, synapse):
+                    nonlocal send_ok, send_fail
+                    t_start = time.time()
+                    try:
+                        resp = await self.dendrite(
+                            axons=axon, synapse=synapse, timeout=5, deserialize=False
+                        )
+                        t = time.time() - t_start
+                        status = getattr(getattr(resp, 'dendrite', None), 'status_code', None)
+                        msg = getattr(getattr(resp, 'dendrite', None), 'status_message', '')
+                        gtx_log.info(f"round={round_id} uid={uid} {axon.ip}:{axon.port} status={status} msg={msg} t={t:.2f}s")
+                        if status == 200:
+                            send_ok += 1
+                        else:
+                            send_fail += 1
+                    except Exception as exc:
+                        t = time.time() - t_start
+                        gtx_log.warning(f"round={round_id} uid={uid} send failed after {t:.2f}s: {exc}")
+                        send_fail += 1
+
+                t_deliver_start = time.time()
+                await asyncio.gather(*[_send(u, a, s) for u, a, s in deliveries])
+                t_deliver = time.time() - t_deliver_start
+                gtx_log.info(
+                    f"deliver round={round_id} n={len(deliveries)} ok={send_ok} fail={send_fail} t_total={t_deliver:.2f}s"
+                )
+            except Exception as exc:
+                gtx_log.error(f"delivery failed: {exc}")
+                import traceback
+                gtx_log.error(traceback.format_exc())
 
         def _sync_and_check(self):
             """
@@ -3131,6 +3410,9 @@ if __name__ != "__mp_main__":
                 'kappa_values': self.kappa_values,
                 'unnormalized_scores': self.unnormalized_scores,
                 'scores': {i: score.item() for i, score in enumerate(self.scores)},
+                'gentrx_scores': {i: score.item() for i, score in enumerate(self.gentrx_scores)},
+                'gentrx_enabled': self._gentrx is not None,
+                'gentrx_training': self._gentrx.get_training_stats() if self._gentrx is not None else {},
                 'miner_stats': self.miner_stats,
                 'initial_balances': self.initial_balances,
                 'initial_balances_published': self.initial_balances_published,
@@ -3158,6 +3440,7 @@ if __name__ != "__mp_main__":
                         'kappa_normalization_max': self.config.scoring.kappa.normalization_max,
                         'kappa_pnl_impact': self.config.scoring.kappa.pnl.impact,
                         'pnl_weight': self.config.scoring.pnl.weight,
+                        'gentrx_simulation_share': getattr(getattr(self.config.scoring, 'gentrx', None), 'simulation_share', 0.0) or 0.0,
                         'pnl_normalization_min_daily_return': self.config.scoring.pnl.min_daily_return,
                         'pnl_normalization_max_daily_return': self.config.scoring.pnl.max_daily_return,
                         'activity_impact': self.config.scoring.activity.impact,
@@ -3539,6 +3822,8 @@ if __name__ != "__mp_main__":
                     if uid_item in notices:
                         trades = [notice for notice in notices[uid_item] if notice['y'] in ['EVENT_TRADE', "ET"]]
                         if trades:
+                            if uid_item not in self.recent_miner_trades:
+                                self.recent_miner_trades[uid_item] = {b: [] for b in range(self.simulation.book_count)}
                             recent_miner_trades_uid = self.recent_miner_trades[uid_item]
                             if uid_item not in volume_deltas:
                                 volume_deltas[uid_item] = {}
@@ -3617,6 +3902,11 @@ if __name__ != "__mp_main__":
 
                     # Update inventory history
                     if uid_item in accounts:
+                        if uid_item not in self.initial_balances:
+                            self.initial_balances[uid_item] = {
+                                b: {'BASE': None, 'QUOTE': None, 'WEALTH': None}
+                                for b in range(self.simulation.book_count)
+                            }
                         initial_balances_uid = self.initial_balances[uid_item]
                         accounts_uid = accounts[uid_item]
 
@@ -3792,7 +4082,7 @@ if __name__ != "__mp_main__":
                         calc_start = time.time()
 
                         loop = asyncio.get_event_loop()
-                        rewards, updated_data = await loop.run_in_executor(
+                        trading_rewards, gentrx_rewards, updated_data, all_uids = await loop.run_in_executor(
                             self.reward_executor,
                             get_rewards,
                             self
@@ -3804,9 +4094,11 @@ if __name__ != "__mp_main__":
                         self.activity_factors = updated_data['activity_factors']
                         self.pnl_factors = updated_data['pnl_factors']
 
-                        bt.logging.debug(f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n{rewards}")
-                        all_uids = list(range(self.effective_max_uids))
-                        self.update_scores(rewards, all_uids)
+                        bt.logging.debug(
+                            f"Agent Rewards Recalculated for {duration} ({time.time()-start:.4f}s):\n"
+                            f"trading={trading_rewards}\ngentrx={gentrx_rewards}"
+                        )
+                        self.update_scores(trading_rewards, all_uids, gentrx_rewards=gentrx_rewards)
                         bt.logging.info(f"Agent Scores Updated for {duration} ({time.time()-start:.4f}s)")
                         self._last_rewarded_sim_timestamp = timestamp
 
@@ -3908,6 +4200,15 @@ if __name__ != "__mp_main__":
 
             # Process deregistration notices
             self.process_resets(state)
+
+            # GenTRX: save state to S3 + poll/deliver assignments
+            if self._gentrx is not None:
+                try:
+                    self._gentrx.push_state(state)
+                    await self._gentrx.poll_and_deliver()
+                except Exception as _gex:
+                    gtx_log.warning(f"handle_state error: {_gex}")
+
             # Forward state synapse to miners, populate response data to simulator object and serialize for returning to simulator.
             start = time.time()
             response = SimulatorResponseBatch(await forward(self, state))

@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Simple regressor agent: collects market data and predicts future returns using
+a scikit-learn online regression model to drive order placement decisions.
+"""
 
 import time
 import pandas as pd
@@ -18,10 +22,6 @@ from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 
 from sklearn.metrics import accuracy_score
 
-"""
-An example of a basic AI trading agent that collects market data and predicts 
-future returns using a simple regression model.
-"""
 
 class SimpleRegressorAgent(FinanceSimulationAIRegressorAgent):
     def print_config(self):

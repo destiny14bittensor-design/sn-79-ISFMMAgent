@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
+# SPDX-License-Identifier: MIT
+"""Minimal GenTRX training aggregator reader: aggregation.jsonl.
+
+Usage:
+    # Live watch of the most recent run (refreshes every 10s)
+    bin/gentrx_inspect --watch
+
+    # One-shot summary of the most recent run
+    bin/gentrx_inspect
+
+    # Show all sims in the log, separated by sim_id
+    bin/gentrx_inspect --all
+
+    # Pick a specific sim by id (full or unique prefix)
+    bin/gentrx_inspect --sim a1b2c3d4
+
+    # List the sims found in the log without rendering details
+    bin/gentrx_inspect --list
+
+    # Custom log path
+    bin/gentrx_inspect --log checkpoints/GenTRX/aggregation.jsonl
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from collections import OrderedDict
+
+
+def load_events(path: str) -> list[dict]:
+    events = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    events.append(json.loads(line))
+    except FileNotFoundError:
+        pass
+    return events
+
+
+def _bucket_key(event: dict) -> str:
+    """Split events first by sim_id, then by sim_epoch within a sim_id.
+
+    sim_id can be None (events emitted before the first state packet bound a
+    sim — e.g. server_start) — those bucket under "<no-sim>". Pre-rollout
+    events with neither field bucket under "legacy".
+    """
+    if "sim_id" not in event and "sim_epoch" not in event:
+        return "legacy"
+    sid = event.get("sim_id") or "<no-sim>"
+    epoch = event.get("sim_epoch", 0)
+    return f"{sid}#{epoch}" if epoch else str(sid)
+
+
+def group_by_sim(events: list[dict]) -> "OrderedDict[str, list[dict]]":
+    """Group events by sim bucket, preserving first-seen order."""
+    sims: OrderedDict[str, list[dict]] = OrderedDict()
+    for e in events:
+        sims.setdefault(_bucket_key(e), []).append(e)
+    return sims
+
+
+def resolve_sim(sims: "OrderedDict[str, list[dict]]", arg: str | None) -> str | None:
+    """Pick the sim bucket to render. None argument → most recent sim."""
+    if not sims:
+        return None
+    if arg is None:
+        return next(reversed(sims))
+    matches = [k for k in sims if k == arg or k.startswith(arg)]
+    if not matches:
+        print(f"No sim matches '{arg}'. Available: {', '.join(sims)}")
+        return None
+    if len(matches) > 1:
+        print(f"Ambiguous sim prefix '{arg}'. Matches: {', '.join(matches)}")
+        return None
+    return matches[0]
+
+
+def render(events: list[dict], header_label: str = ""):
+    agg_events = [
+        e for e in events if e.get("type") == "aggregation" and e.get("n_scored", 0) > 0
+    ]
+    score_events = [e for e in events if e.get("type") == "gradient_score"]
+    boundary_events = [
+        e for e in events if e.get("type") in ("server_start", "sim_bind")
+    ]
+
+    if not agg_events and not boundary_events:
+        print(f"  (no events for {header_label or 'this sim'})")
+        return
+
+    # --- Header ---
+    sid = events[0].get("sim_id") if events else None
+    sim_epoch = events[0].get("sim_epoch", 0) if events else 0
+    started_at = boundary_events[0].get("timestamp") if boundary_events else (
+        agg_events[0].get("timestamp") if agg_events else None
+    )
+    started_str = (
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(started_at))
+        if started_at else "?"
+    )
+    sid_label = sid or "(no sim_id)"
+    if sim_epoch:
+        sid_label = f"{sid_label}  (epoch {sim_epoch})"
+
+    print(f"GenTRX Training Dashboard")
+    print(f"{'=' * 60}")
+    print(f"  sim_id        : {sid_label}{(' ' + header_label) if header_label else ''}")
+    print(f"  Started at    : {started_str}")
+    if not agg_events:
+        print(f"  (sim bound, no aggregation events yet)")
+        return
+
+    latest = agg_events[-1]
+    total_rounds = len(agg_events)
+    print(f"  Model version : {latest.get('version', '?')}")
+    print(f"  Total rounds  : {total_rounds}")
+    print(f"  Latest loss   : {latest.get('loss_after', 0):.4f}")
+    print()
+
+    # --- Loss history ---
+    print(f"Loss History (last 20 rounds)")
+    print(f"{'-' * 60}")
+    recent_agg = agg_events[-20:]
+    for e in recent_agg:
+        v = e.get("version", "?")
+        lb = e.get("loss_before", 0)
+        la = e.get("loss_after", 0)
+        n_acc = e.get("n_accepted", 0)
+        n_sc = e.get("n_scored", 0)
+        rb = e.get("rolled_back", False)
+        delta = la - lb
+        arrow = "↓" if delta < 0 else "↑" if delta > 0 else "="
+        rb_mark = " ROLLBACK" if rb else ""
+        print(
+            f"  v{v:>3}  {lb:>8.4f} → {la:>8.4f}  {arrow} {abs(delta):>7.4f}  "
+            f"accepted={n_acc}/{n_sc}{rb_mark}"
+        )
+
+    # --- Loss chart (ASCII sparkline) ---
+    losses = [e.get("loss_after", 0) for e in agg_events if not e.get("rolled_back")]
+    if len(losses) > 2:
+        print()
+        print(f"Loss Trend")
+        print(f"{'-' * 60}")
+        _sparkline(losses[-50:], width=55, height=8)
+
+    # --- Per-miner scores ---
+    print()
+    print(f"Per-Miner Scores (last round)")
+    print(f"{'-' * 60}")
+
+    latest_version = latest.get("version", 0)
+    round_scores = [
+        s for s in score_events
+        if s.get("version") in (latest_version, latest_version - 1)
+    ]
+
+    if round_scores:
+        miners: dict = {}
+        for s in round_scores:
+            uid = s.get("miner", "?")
+            miners.setdefault(uid, []).append(s)
+
+        for uid in sorted(miners.keys()):
+            scores = miners[uid]
+            latest_score = scores[-1]
+            avg = sum(s["score"] for s in scores) / len(scores)
+            accepted = sum(1 for s in scores if s.get("accepted"))
+            total = len(scores)
+            mark = "✓" if latest_score.get("accepted") else "✗"
+            print(
+                f"  miner {uid:>3}  score={latest_score['score']:>+.4f}  "
+                f"avg={avg:>+.4f}  accepted={accepted}/{total}  {mark}"
+            )
+    else:
+        print("  (no score data)")
+
+    # --- Timing ---
+    print()
+    print(f"Timing")
+    print(f"{'-' * 60}")
+    if len(agg_events) >= 2:
+        intervals = []
+        for i in range(1, min(len(agg_events), 20)):
+            dt = agg_events[-i].get("timestamp", 0) - agg_events[-i - 1].get("timestamp", 0)
+            if dt > 0:
+                intervals.append(dt)
+        if intervals:
+            avg_interval = sum(intervals) / len(intervals)
+            print(f"  Avg round time : {avg_interval:.1f}s (last {len(intervals)} rounds)")
+
+    first_ts = agg_events[0].get("timestamp", 0)
+    last_ts = agg_events[-1].get("timestamp", 0)
+    if first_ts and last_ts:
+        elapsed = last_ts - first_ts
+        hours = elapsed / 3600
+        rounds_per_hour = total_rounds / hours if hours > 0 else 0
+        print(f"  Elapsed        : {hours:.1f}h")
+        print(f"  Rounds/hour    : {rounds_per_hour:.1f}")
+
+    print()
+    ts = time.strftime("%H:%M:%S", time.localtime(latest.get("timestamp", 0)))
+    print(f"  Last update: {ts}")
+
+
+def render_sim_list(sims: "OrderedDict[str, list[dict]]"):
+    print(f"Sims in log ({len(sims)})")
+    print(f"{'=' * 70}")
+    print(f"  {'bucket':<24}  {'started':<19}  {'rounds':>6}  {'epoch':>5}")
+    print(f"  {'-' * 24}  {'-' * 19}  {'-' * 6}  {'-' * 5}")
+    for key, events in sims.items():
+        agg = [e for e in events if e.get("type") == "aggregation" and e.get("n_scored", 0) > 0]
+        first_ts = events[0].get("timestamp", 0) if events else 0
+        started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(first_ts)) if first_ts else "?"
+        epoch = events[0].get("sim_epoch", 0) if events else 0
+        # Truncate long bucket keys (sim_id can be a UUID + #epoch suffix)
+        bucket_disp = key if len(key) <= 24 else key[:21] + "…"
+        print(
+            f"  {bucket_disp:<24}  {started:<19}  {len(agg):>6}  {epoch:>5}"
+        )
+
+
+def _sparkline(values: list[float], width: int = 50, height: int = 6):
+    """Simple ASCII chart."""
+    if not values:
+        return
+
+    mn = min(values)
+    mx = max(values)
+    rng = mx - mn or 1
+
+    if len(values) > width:
+        step = len(values) / width
+        sampled = [values[int(i * step)] for i in range(width)]
+    else:
+        sampled = values
+
+    grid = [[" "] * len(sampled) for _ in range(height)]
+    for col, v in enumerate(sampled):
+        row = int((1 - (v - mn) / rng) * (height - 1))
+        row = max(0, min(height - 1, row))
+        grid[row][col] = "█"
+
+    for r, row in enumerate(grid):
+        if r == 0:
+            label = f"{mx:>8.2f} │"
+        elif r == height - 1:
+            label = f"{mn:>8.2f} │"
+        else:
+            label = f"{'':>8} │"
+        print(f"  {label}{''.join(row)}")
+
+
+def render_all(sims: "OrderedDict[str, list[dict]]"):
+    """Render every sim with separators, oldest first."""
+    for i, (key, events) in enumerate(sims.items()):
+        if i:
+            print()
+            print()
+        render(events, header_label=f"({i + 1}/{len(sims)})")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="GenTRX training dashboard")
+    parser.add_argument(
+        "--log",
+        default="checkpoints/GenTRX/aggregation.jsonl",
+        help="Path to aggregation.jsonl",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Live refresh every 10 seconds",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=10,
+        help="Refresh interval in seconds (with --watch)",
+    )
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument(
+        "--sim",
+        help="Render this specific sim_id (or unique prefix)",
+    )
+    selector.add_argument(
+        "--all",
+        action="store_true",
+        help="Render every sim in the log, oldest first",
+    )
+    selector.add_argument(
+        "--list",
+        action="store_true",
+        help="List sims in the log and exit",
+    )
+    args = parser.parse_args()
+
+    def _draw():
+        events = load_events(args.log)
+        sims = group_by_sim(events)
+        if args.list:
+            render_sim_list(sims)
+            return
+        if args.all:
+            render_all(sims)
+            return
+        key = resolve_sim(sims, args.sim)
+        if key is None:
+            return
+        render(sims[key])
+
+    if args.watch:
+        try:
+            while True:
+                os.system("clear" if os.name != "nt" else "cls")
+                _draw()
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+    else:
+        _draw()
+
+
+if __name__ == "__main__":
+    main()

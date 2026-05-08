@@ -1,5 +1,7 @@
 logs/
+wandb/
 vcpkg/
+.gradient_server.sh
 
 #VSCode
 .vscode/
@@ -169,15 +171,25 @@ cython_debug/
 cmd.txt
 reuse_annot.py
 setup.sh
-agents/MaliciousAgent.py
 agents/data
 simulate/trading/src/python
-simulate/trading/run/GBM.py
-simulate/trading/run/HighFrequencyTraderAgent.py
-simulate/trading/run/StylizedTraderAgent.py
-simulate/trading/run/Texifier.py
-simulate/trading/run/TraderLogger.py
-simulate/trading/run/TraderReporting.py
 
 testing/
 scripts/
+
+# GenTRX runtime artifacts
+data/live/
+data/localnet_test/
+agents/*/miner_buckets.json
+agents/gentrx_proxy/config.json
+
+# Local runtime / generated files
+.claude/
+activity.csv
+checkpoints/
+agents/exchange/
+mvtrx/
+mvtrx-chainlayer-rs/
+taos/im/config/batch_signer_ledger.db
+taos/im/config/proxy_passwords.enc
+taos/im/config/benchmark_agents_test.json

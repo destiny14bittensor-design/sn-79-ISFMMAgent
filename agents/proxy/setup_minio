@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Start MinIO (local S3) and create bucket.
+# Sources env vars into the current shell.
+#
+# Does NOT wipe data — bucket contents are preserved if the container is reused.
+# To wipe data at proxy test start, call bin/proxy/wipe_bucket after sourcing this.
+#
+# Usage: source agents/proxy/setup_minio
+#        (must be sourced, not executed, to export env vars)
+SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+G=$(realpath "$SCRIPT_DIR/../..")
+PY3="${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}"
+PY3="${PY3:-python3}"
+
+# Load repo .env so TAOS_MINIO_BIN and overrides are available
+[ -f "$G/.env" ] && . "$G/.env"
+
+MINIO_CONTAINER="${MINIO_CONTAINER:-gentrx_minio}"
+MINIO_PORT="${MINIO_PORT:-9000}"
+# Console default is 9091 (NOT 9001): the validator's --prometheus.port
+# defaults to 9001, so we move the newer service (MinIO console) off that
+# port. Override with MINIO_CONSOLE if you need a different value.
+MINIO_CONSOLE="${MINIO_CONSOLE:-9091}"
+S3_ACCESS="${GENTRX_ACCESS_KEY:-minioadmin}"
+S3_SECRET="${GENTRX_SECRET_KEY:-minioadmin}"
+S3_ENDPOINT="http://localhost:$MINIO_PORT"
+
+echo "Starting MinIO ($S3_ENDPOINT)..."
+
+# Standalone binary takes priority over Docker; set TAOS_MINIO_BIN in .env
+# to override the binary path (e.g. TAOS_MINIO_BIN=/usr/local/bin/minio).
+_MINIO_BIN="${TAOS_MINIO_BIN:-}"
+if [[ -z "$_MINIO_BIN" ]]; then
+    command -v minio &>/dev/null && _MINIO_BIN="minio"
+fi
+
+if [[ -n "$_MINIO_BIN" ]]; then
+    # ---- Standalone binary mode ----
+    MINIO_DATA="${TAOS_MINIO_DATA:-$HOME/.minio-data/gentrx}"
+    MINIO_LOG="/tmp/gentrx_minio.log"
+    MINIO_PID_FILE="/tmp/gentrx_minio.pid"
+    mkdir -p "$MINIO_DATA"
+    # Stop any previous instance
+    if [[ -f "$MINIO_PID_FILE" ]]; then
+        kill "$(cat "$MINIO_PID_FILE")" 2>/dev/null || true
+        rm -f "$MINIO_PID_FILE"
+    fi
+    pkill -f "$_MINIO_BIN server" 2>/dev/null || true
+    sleep 1
+    MINIO_ROOT_USER="$S3_ACCESS" MINIO_ROOT_PASSWORD="$S3_SECRET" \
+        "$_MINIO_BIN" server "$MINIO_DATA" \
+            --address ":$MINIO_PORT" \
+            --console-address ":$MINIO_CONSOLE" \
+            >"$MINIO_LOG" 2>&1 &
+    echo $! > "$MINIO_PID_FILE"
+    echo "  MinIO binary PID $(cat "$MINIO_PID_FILE") — logs: $MINIO_LOG"
+    export MINIO_LOG_FILE="$MINIO_LOG"
+    sleep 2
+elif command -v docker &>/dev/null; then
+    # ---- Docker fallback ----
+    MINIO_LOG=""
+    docker stop "$MINIO_CONTAINER" 2>/dev/null || true
+    docker rm "$MINIO_CONTAINER" 2>/dev/null || true
+    docker run -d --name "$MINIO_CONTAINER" \
+        -p "$MINIO_PORT":9000 -p "$MINIO_CONSOLE":9001 \
+        -e MINIO_ROOT_USER="$S3_ACCESS" -e MINIO_ROOT_PASSWORD="$S3_SECRET" \
+        minio/minio server /data --console-address ":9001" >/dev/null 2>&1
+    echo "  MinIO container '$MINIO_CONTAINER' started via Docker"
+    sleep 2
+else
+    echo "ERROR: MinIO not found. Install standalone binary or Docker."
+    echo "  Standalone: curl -o ~/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && chmod +x ~/bin/minio"
+    echo "  Then set TAOS_MINIO_BIN=~/bin/minio in .env"
+    return 1
+fi
+
+# Number of agent buckets (from GENTRX_N_AGENTS or default 2)
+N_AGENTS="${GENTRX_N_AGENTS:-2}"
+
+$PY3 -c "
+import boto3, sys
+client = boto3.client('s3',
+    endpoint_url='$S3_ENDPOINT',
+    aws_access_key_id='$S3_ACCESS',
+    aws_secret_access_key='$S3_SECRET',
+    region_name='us-east-1')
+
+# Unified validator bucket (checkpoints + data + scores) + per-miner gradient buckets
+buckets = ['gentrx-validator'] + [f'agent-{i}' for i in range($N_AGENTS)]
+for b in buckets:
+    try:
+        client.create_bucket(Bucket=b)
+        print(f'  Bucket created: {b}')
+    except client.exceptions.BucketAlreadyOwnedByYou:
+        print(f'  Bucket exists: {b}')
+    except Exception as e:
+        print(f'  Bucket {b}: {e}')
+"
+
+export GENTRX_N_AGENTS="$N_AGENTS"
+
+# Chain endpoint override — on-chain commitments only carry account_id, so
+# self-hosted MinIO needs an explicit S3 endpoint for all discovered buckets.
+export GENTRX_CHAIN_ENDPOINT_OVERRIDE="$S3_ENDPOINT"
+
+# Unified validator bucket (checkpoints + data + proposals).
+# Validator side: GENTRX_VALIDATOR_S3_* (writeable, this validator's own bucket).
+export GENTRX_VALIDATOR_S3_ENDPOINT_URL="$S3_ENDPOINT"
+export GENTRX_VALIDATOR_S3_BUCKET="gentrx-validator"
+export GENTRX_VALIDATOR_S3_WRITE_ACCESS_KEY="$S3_ACCESS"
+export GENTRX_VALIDATOR_S3_WRITE_SECRET_KEY="$S3_SECRET"
+export GENTRX_VALIDATOR_S3_READ_ACCESS_KEY="$S3_ACCESS"
+export GENTRX_VALIDATOR_S3_READ_SECRET_KEY="$S3_SECRET"
+
+# Miner side: GENTRX_AGGREGATOR_S3_* (read-only fallback for the uid-0
+# bucket when chain discovery has not resolved). In the proxy test the
+# validator and aggregator are the same single bucket.
+export GENTRX_AGGREGATOR_S3_ENDPOINT_URL="$S3_ENDPOINT"
+export GENTRX_AGGREGATOR_S3_BUCKET="gentrx-validator"
+export GENTRX_AGGREGATOR_S3_READ_ACCESS_KEY="$S3_ACCESS"
+export GENTRX_AGGREGATOR_S3_READ_SECRET_KEY="$S3_SECRET"
+
+# Generate miner_buckets.json for gradient server (LocalBucketConfig, proxy test only)
+MINER_BUCKETS_JSON="$SCRIPT_DIR/miner_buckets.json"
+$PY3 -c "
+import json, sys
+n = int(sys.argv[1])
+buckets = {}
+for i in range(n):
+    buckets[str(i)] = {
+        'endpoint_url': '$S3_ENDPOINT',
+        'bucket': f'agent-{i}',
+        'access_key': '$S3_ACCESS',
+        'secret_key': '$S3_SECRET',
+    }
+json.dump(buckets, open(sys.argv[2], 'w'), indent=2)
+print(f'  Generated {sys.argv[2]} ({n} agents)')
+" "$N_AGENTS" "$MINER_BUCKETS_JSON"
+
+export GENTRX_MINER_BUCKETS="$MINER_BUCKETS_JSON"
+
+# Miner-side agent bucket vars (used by run_miner.sh -G).
+# Points to agent-0 by default; override GENTRX_AGENT_BUCKET_INDEX before
+# sourcing this file to select a different slot for multi-UID setups.
+_AGENT_IDX="${GENTRX_AGENT_BUCKET_INDEX:-0}"
+export GENTRX_AGENT_S3_ENDPOINT_URL="$S3_ENDPOINT"
+export GENTRX_AGENT_S3_BUCKET="agent-${_AGENT_IDX}"
+export GENTRX_AGENT_S3_ACCESS_KEY="$S3_ACCESS"
+export GENTRX_AGENT_S3_SECRET_KEY="$S3_SECRET"
+export GENTRX_AGENT_S3_READ_ACCESS_KEY="$S3_ACCESS"
+export GENTRX_AGENT_S3_READ_SECRET_KEY="$S3_SECRET"
+
+echo "S3 env vars exported."
+echo "  Endpoint:   $S3_ENDPOINT"
+echo "  Validator:  gentrx-validator (GENTRX_VALIDATOR_S3_*)"
+echo "  Agent:      agent-${_AGENT_IDX} (GENTRX_AGENT_S3_*) — override with GENTRX_AGENT_BUCKET_INDEX"
+echo "  Per-miner:  agent-0 .. agent-$((N_AGENTS-1))"
+echo "  Chain ovr:  GENTRX_CHAIN_ENDPOINT_OVERRIDE=$S3_ENDPOINT"
+echo "  Miner cfg:  $MINER_BUCKETS_JSON"
+echo "  MinIO UI:   http://localhost:$MINIO_CONSOLE"

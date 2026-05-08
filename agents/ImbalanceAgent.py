@@ -1,21 +1,24 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Order-book imbalance agent: uses a rolling window of detailed LOB history to
+compute bid/ask imbalance and drive limit order placement decisions.
+Supports GenTRX distributed training via agent params.
+"""
 import time
 import traceback
 import bittensor as bt
 
 from taos.common.agents import launch
 from taos.im.utils import duration_from_timestamp
-from taos.im.agents import FinanceSimulationAgent, StateHistoryManager
+from taos.im.agents import StateHistoryManager
 from taos.im.protocol.models import *
 from taos.im.protocol.instructions import *
 from taos.im.protocol import MarketSimulationStateUpdate, FinanceAgentResponse
 
-"""
-A simple example data-driven agent which utilizes a window of detailed orderbook history to calculate the orderbook imbalance.
-Trading logic utilizes the order imbalance in a simple way to determine order placements.
-"""
-class ImbalanceAgent(FinanceSimulationAgent):
+from taos.im.agents import GenTRXAgent
+
+class ImbalanceAgent(GenTRXAgent):
     def initialize(self):
         """
         Initializes properties, variables, and components needed by the agent.
@@ -26,6 +29,12 @@ class ImbalanceAgent(FinanceSimulationAgent):
             self.imbalance_depth (int | None): Depth of order book levels to consider for imbalance calculation (default=`None` => include all available levels).
             self.history_manager (StateHistoryManager): Tracks and manages historical market data for the agent.
         """
+        # GenTRX is opt-in: only activates when explicitly configured.
+        if not hasattr(self.config, 'gtx_training_enabled'):
+            self.config.gtx_training_enabled = False
+        if not hasattr(self.config, 'gtx_collect_data'):
+            self.config.gtx_collect_data = False
+        super().initialize()
         self.expiry_period: int = int(self.config.expiry_period)
         self.imbalance_depth: int = int(self.config.imbalance_depth) if hasattr(self.config, 'imbalance_depth') else None
         self.parallel_history_workers: int = int(self.config.parallel_history_workers) if hasattr(self.config, 'parallel_history_workers') else 0
@@ -56,8 +65,8 @@ class ImbalanceAgent(FinanceSimulationAgent):
             4. Places buy orders if imbalance is positive, or sell orders if 
                imbalance is negative.
         """
-        # Initialize response container for the current agent
-        response = FinanceAgentResponse(agent_id=self.uid)
+        # GenTRX: data collection + training trigger (runs even when training disabled).
+        response = super().respond(state)
         validator = state.dendrite.hotkey        
         
         # If updating of history using previous state information is not done, wait for it to complete.

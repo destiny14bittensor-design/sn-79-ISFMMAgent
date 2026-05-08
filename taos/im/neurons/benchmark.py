@@ -17,6 +17,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+"""
+Benchmark miner neuron: runs a deterministic reference agent with a fixed
+validator-assigned UID (>= 256), bypassing on-chain registration.
+"""
 
 if __name__ != "__mp_main__":
     import time
@@ -137,6 +141,19 @@ if __name__ != "__mp_main__":
                 blacklist_fn=self.blacklist_update,
                 priority_fn=self.priority_update,
             )
+            # Attach GenTRX assignment handler (inherited from Miner).
+            # Benchmark miners participate in GenTRX training when
+            # GENTRX_AGENT_S3_* env vars are set; handler is a no-op otherwise.
+            try:
+                from taos.im.protocol.gentrx import GenTRXAssignment
+                self.axon.attach(
+                    forward_fn=self.forward_gentrx_assignment,
+                    blacklist_fn=self.blacklist_gentrx_assignment,
+                    priority_fn=self.priority_gentrx_assignment,
+                )
+                bt.logging.info("GenTRX assignment handler attached to benchmark axon.")
+            except ImportError:
+                bt.logging.debug("GenTRX not installed — skipping assignment handler.")
             bt.logging.info(f"Axon created: {self.axon}")
 
             # Instantiate runners

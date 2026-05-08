@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Market data seed collection: real-time price feed from Coinbase/Binance,
+written to CSV files accessible by the simulator.
+"""
 import os
 import sys
 import argparse
@@ -26,8 +30,13 @@ def _handle_sigusr1(signum, frame):
 
 def run_seed_service(config):
     """
-    Standalone seed service that runs in its own process.
-    Completely isolated from validator to prevent blocking.
+    Standalone seed service entry point that runs in its own process.
+
+    Loops forever, restarting `seed()` on any exception. Completely isolated
+    from the validator to prevent blocking.
+
+    Args:
+        config: Configuration object with seed symbols and parameters.
     """
     global _current_log_dir
     
@@ -50,10 +59,13 @@ def run_seed_service(config):
 
 def seed(config):
     """
-    Main seed data collection loop (runs in separate process).
-    
+    Main seed data collection loop (runs in a separate process).
+
+    Opens WebSocket connections to Coinbase and Binance, writes incoming
+    price data to CSV files, and rotates log directories on SIGUSR1.
+
     Args:
-        config: Configuration object with seed symbols and parameters
+        config: Configuration object with seed symbols and data directory path.
     """
     global _current_log_dir, _log_dir_changed
     

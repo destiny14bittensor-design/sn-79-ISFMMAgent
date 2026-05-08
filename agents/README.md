@@ -448,6 +448,13 @@ Explicitly, if a miner has traded more than `scoring.activity.capital_turnover_c
 
 You can debug and test your agent logic offline before deploying to testnet or mainnet by making use of the facilities documented [here](/agents/proxy/README.md).  This setup allows to launch the simulator on your machine, and receive messages to the agent via a proxy which fulfils the role of the validator in a local setting.
 
+For agents that participate in **GenTRX distributed training** (in addition
+to trading), see:
+- [`agents/proxy/README.md`](/agents/proxy/README.md) — proxy
+  test with the full GenTRX gradient-server loop (no chain).
+- [`doc/gentrx/miner_setup.md`](/doc/gentrx/miner_setup.md) — production
+  miner setup (R2 bucket + on-chain commit).
+
 ### Testnet (Netuid 366)
 
 Once you are satisfied that your agent logic works as intended, we recommend to register a UID on testnet (netuid 366) and deploy your miner as you intend to host it in mainnet environment.  This allows to confirm that all is properly configured for communication with validators, and the resources allocated to the miner are sufficient.  You can request testnet TAO at the [Bittensor Discord](https://discord.com/channels/799672011265015819/1389370202327748629).
@@ -457,6 +464,52 @@ Once you are satisfied that your agent logic works as intended, we recommend to 
 If all looks to be functioning well in testnet, register a UID on mainnet netuid 79 and restart your miner using the mainnet endpoint and your registered hotkey.  If you encounter issues, our team monitors the [τaos channel](https://discord.com/channels/799672011265015819/1353733356470276096) at BT Discord server.
 
 Good luck!
+
+---
+
+## GenTRX Distributed Training <span id="gentrx"><span>
+
+In addition to trading, miners can participate in **GenTRX** — a distributed training loop that builds a shared generative order-book model. Each training round, a miner downloads recent simulation data from the validator's S3 bucket, trains for a configurable number of steps, and uploads a compressed gradient delta. Validators score the gradient against held-out data; the aggregator (uid 0) aggregates accepted deltas and publishes the next checkpoint.
+
+**Reward:** 5% of miner rewards are allocated to the GenTRX training pool by default (configurable by validators via `--scoring.gentrx.simulation_share`). This is separate from and additive to trading rewards: a miner that both trades well and trains well earns from both pools.
+
+### GenTRX distributed training
+
+All example agents support GenTRX distributed training. Training is **off by default** and activates only when `gtx_training_enabled=true` is passed in `--agent.params`. Agents run identically to prior behaviour without that flag.
+
+| Agent | Trading logic | Notes |
+|---|---|---|
+| [`RandomMakerAgent`](RandomMakerAgent.py) | Random limit orders | Add `gtx_training_enabled=true` to enable |
+| [`RandomTakerAgent`](RandomTakerAgent.py) | Random market orders | Add `gtx_training_enabled=true` to enable |
+| [`ImbalanceAgent`](ImbalanceAgent.py) | LOB imbalance signal | Add `gtx_training_enabled=true` to enable |
+| [`MovingHurstAgent`](MovingHurstAgent.py) | Hurst exponent momentum/reversion | Add `gtx_training_enabled=true` to enable |
+| [`OrderOptionAgent`](OrderOptionAgent.py) | Advanced order options demo | Add `gtx_training_enabled=true` to enable |
+| [`SimpleAgent`](SimpleAgent.py) | External signal + OHLC candles | Add `gtx_training_enabled=true` to enable |
+| [`RevengAgent`](RevengAgent.py) | Volume-bucket momentum/reversion | Add `gtx_training_enabled=true` to enable |
+| [`HybridTrainingAgent`](HybridTrainingAgent.py) | Imbalance-driven maker/taker | Training on by default; **template, not a finished strategy** |
+| [`CustomTrainingAgent`](CustomTrainingAgent.py) | None — annotated template | Override `_train_background` to plug in a custom training loop |
+
+`GenTRXAgent` is the base class for all of the above; it lives in `taos.im.agents` (not in this directory). **To add GenTRX training to a custom strategy**, subclass `GenTRXAgent`, call `super().initialize()` and `super().respond(state)`, and the training loop is inherited. See [`CustomTrainingAgent.py`](CustomTrainingAgent.py) for an annotated example and [`doc/gentrx/integration.md`](/doc/gentrx/integration.md) for the full contract.
+
+> **Note on `HybridTrainingAgent`:** Its docstring explicitly warns that deploying unmodified copies across many miners will cause them to interfere with each other. Use it as a starting point and customize the signal logic.
+
+### Quick setup
+
+Full instructions are in [`doc/gentrx/miner_setup.md`](/doc/gentrx/miner_setup.md). In brief:
+
+1. Create a Cloudflare R2 or Hippius bucket and generate write + read API tokens.
+2. Run `python bin/setup_miner_bucket.py …` to verify tokens and commit read credentials on-chain.
+3. Set `GENTRX_AGENT_S3_*` env vars in `.env`.
+4. Run `bin/gentrx_preflight --role miner --env mainnet` to verify all components.
+5. Run `./run_miner.sh -G` to launch with GenTRX training enabled.
+
+Training is **enabled by default** (`gtx_training_enabled=true`). To opt out, pass `gtx_training_enabled=false` in `--agent.params`.
+
+### Testing locally
+
+| Test | What it covers | Runner |
+|---|---|---|
+| Proxy test (no chain) | Full GenTRX training loop, assignment lifecycle, scoring | [`agents/proxy/README.md`](/agents/proxy/README.md) |
 
 ---
 ---

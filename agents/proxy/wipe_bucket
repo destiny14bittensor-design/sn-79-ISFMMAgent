@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Wipe all objects from the GenTRX proxy-test buckets.
+# Call this at the start of a proxy test run to ensure a clean state.
+# Requires the env vars exported by setup_minio.
+#
+# Usage: source agents/proxy/setup_minio && source agents/proxy/wipe_bucket
+
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+G=$(realpath "$SCRIPT_DIR/../..")
+PY3="${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}"
+PY3="${PY3:-python3}"
+
+if [[ -z "$GENTRX_VALIDATOR_S3_ENDPOINT_URL" ]]; then
+    echo "ERROR: GENTRX_VALIDATOR_S3_ENDPOINT_URL not set. Source setup_minio first."
+    exit 1
+fi
+
+ENDPOINT="$GENTRX_VALIDATOR_S3_ENDPOINT_URL"
+ACCESS="${GENTRX_VALIDATOR_S3_WRITE_ACCESS_KEY:-$GENTRX_VALIDATOR_S3_READ_ACCESS_KEY}"
+SECRET="${GENTRX_VALIDATOR_S3_WRITE_SECRET_KEY:-$GENTRX_VALIDATOR_S3_READ_SECRET_KEY}"
+
+N_AGENTS="${GENTRX_N_AGENTS:-2}"
+BUCKETS="${GENTRX_VALIDATOR_S3_BUCKET:-gentrx-validator}"
+for i in $(seq 0 $((N_AGENTS - 1))); do
+    BUCKETS="$BUCKETS agent-$i"
+done
+
+echo "Wiping buckets ($BUCKETS) at $ENDPOINT..."
+
+$PY3 -c "
+import boto3
+client = boto3.client('s3',
+    endpoint_url='$ENDPOINT',
+    aws_access_key_id='$ACCESS',
+    aws_secret_access_key='$SECRET',
+    region_name='us-east-1')
+paginator = client.get_paginator('list_objects_v2')
+for bucket in '$BUCKETS'.split():
+    deleted = 0
+    try:
+        for page in paginator.paginate(Bucket=bucket):
+            objects = [{'Key': obj['Key']} for obj in page.get('Contents', [])]
+            if objects:
+                client.delete_objects(Bucket=bucket, Delete={'Objects': objects})
+                deleted += len(objects)
+        print(f'  Cleared {deleted} objects from {bucket}')
+    except Exception as e:
+        print(f'  Skip {bucket}: {e}')
+"

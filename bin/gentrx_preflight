@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
+# SPDX-License-Identifier: MIT
+"""GenTRX preflight checker.
+
+Verifies that all manual setup components are in place before launching a
+validator / miner / gradient server.
+
+Read-only: never commits to the chain, never writes to S3 outside of tiny
+self-cleaned probe objects. Safe to invoke repeatedly.
+
+Usage:
+    bin/gentrx_preflight --role validator       --env mainnet  --gentrx-enabled
+    bin/gentrx_preflight --role miner           --env mainnet
+    bin/gentrx_preflight --role miner           --env testnet  --netuid <testnet-netuid>
+    bin/gentrx_preflight --role gradient-server --env localnet
+
+Each `--env` value sets sensible defaults for `--chain-endpoint` and
+(for mainnet/localnet) `--netuid`. Override either with the matching
+flag or the `SUBTENSOR_ENDPOINT` / `NETUID` env vars.
+
+Environments (chain shortcut resolved by the bittensor SDK):
+    localnet  Local subtensor running on this host (Docker devnet-ready
+              container or equivalent). Chain shortcut `local`, netuid 1.
+              Skips the strict on-chain commitment / permit checks because
+              devnet has no real staking.
+    testnet   Public bittensor testnet. Chain shortcut `test`, netuid 79
+              (override with --netuid if the subnet registers under a
+              different number on testnet). Same strict checks as
+              mainnet.
+    mainnet   Production bittensor (subnet 79). Chain shortcut `finney`.
+              Strict on-chain checks.
+
+Exit codes:
+    0 — all required checks passed (warnings allowed)
+    1 — at least one required check failed
+    2 — preflight crashed internally (bug; report please)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import socket
+import sys
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+
+# ---------------------------------------------------------------------------
+# Result types + pretty printing
+# ---------------------------------------------------------------------------
+
+PASS = "PASS"
+FAIL = "FAIL"
+WARN = "WARN"
+SKIP = "SKIP"
+
+
+@dataclass
+class Result:
+    status: str
+    message: str
+    required: bool = True
+
+
+def _color(code: str) -> str:
+    if not sys.stdout.isatty():
+        return ""
+    return code
+
+
+_GREEN = lambda: _color("\033[32m")
+_RED = lambda: _color("\033[31m")
+_YELLOW = lambda: _color("\033[33m")
+_GRAY = lambda: _color("\033[90m")
+_RESET = lambda: _color("\033[0m")
+
+
+def _badge(status: str) -> str:
+    colors = {
+        PASS: _GREEN(),
+        FAIL: _RED(),
+        WARN: _YELLOW(),
+        SKIP: _GRAY(),
+    }
+    return f"{colors.get(status, '')}[{status}]{_RESET()}"
+
+
+# ---------------------------------------------------------------------------
+# Check helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_env_vars(required: list[str]) -> Result:
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
+        return Result(FAIL, f"Missing env vars: {', '.join(missing)}")
+    return Result(PASS, f"All {len(required)} env vars set")
+
+
+def _check_python_deps(required: list[str]) -> Result:
+    missing = []
+    versions = []
+    for mod in required:
+        try:
+            m = __import__(mod)
+            ver = getattr(m, "__version__", "?")
+            versions.append(f"{mod}={ver}")
+        except ImportError:
+            missing.append(mod)
+    if missing:
+        return Result(FAIL, f"Missing Python deps: {', '.join(missing)}")
+    return Result(PASS, "  ".join(versions))
+
+
+def _check_taosim_binary() -> Result:
+    from shutil import which
+    # TAOS_BUILD from env first, then PATH
+    build = os.environ.get("TAOS_BUILD", "")
+    candidate = None
+    if build:
+        candidate = Path(build) / "src" / "cpp" / "taosim"
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return Result(PASS, f"taosim at {candidate}")
+    # Fall back to PATH
+    on_path = which("taosim")
+    if on_path:
+        return Result(PASS, f"taosim at {on_path}")
+    return Result(
+        FAIL,
+        "taosim not found. Set TAOS_BUILD or add simulate/trading/build/src/cpp to PATH.",
+    )
+
+
+def _check_wallet(path: str, name: str, hotkey: str) -> Result:
+    try:
+        import bittensor as bt
+        w = bt.Wallet(path=path, name=name, hotkey=hotkey)
+        # Existence check: accessing the hotkey reads from disk
+        _ = w.hotkey.ss58_address
+        _ = w.coldkeypub.ss58_address
+        return Result(
+            PASS,
+            f"wallet {name}/{hotkey}: hotkey={w.hotkey.ss58_address[:10]}...",
+        )
+    except Exception as exc:
+        return Result(FAIL, f"wallet {name}/{hotkey} unreadable: {exc}")
+
+
+def _check_subtensor(endpoint: str) -> Result:
+    try:
+        import bittensor as bt
+        sub = bt.Subtensor(network=endpoint)
+        block = sub.get_current_block()
+        return Result(PASS, f"subtensor {endpoint} reachable, block={block}")
+    except Exception as exc:
+        return Result(FAIL, f"subtensor {endpoint} unreachable: {exc}")
+
+
+def _check_registered(endpoint: str, netuid: int, wallet_path: str, wallet_name: str, hotkey: str) -> Result:
+    try:
+        import bittensor as bt
+        sub = bt.Subtensor(network=endpoint)
+        w = bt.Wallet(path=wallet_path, name=wallet_name, hotkey=hotkey)
+        if sub.is_hotkey_registered(w.hotkey.ss58_address, netuid=netuid):
+            uid = sub.get_uid_for_hotkey_on_subnet(w.hotkey.ss58_address, netuid=netuid)
+            return Result(PASS, f"wallet registered on netuid={netuid} as uid={uid}")
+        return Result(FAIL, f"wallet NOT registered on netuid={netuid}")
+    except Exception as exc:
+        return Result(FAIL, f"registration check failed: {exc}")
+
+
+def _check_validator_permit(endpoint: str, netuid: int, hotkey_ss58: str, mainnet: bool) -> Result:
+    """Validator permits require stake. Skip on localnet (devnet-ready has SubtokenDisabled)."""
+    if not mainnet:
+        return Result(SKIP, "localnet — devnet-ready chain has no permits", required=False)
+    try:
+        import bittensor as bt
+        sub = bt.Subtensor(network=endpoint)
+        meta = sub.metagraph(netuid=netuid)
+        uid = None
+        for i, hk in enumerate(meta.hotkeys):
+            if hk == hotkey_ss58:
+                uid = i
+                break
+        if uid is None:
+            return Result(FAIL, "wallet not in metagraph (not registered?)")
+        permit = bool(meta.validator_permit[uid].item()) if hasattr(meta.validator_permit[uid], 'item') else bool(meta.validator_permit[uid])
+        if permit:
+            return Result(PASS, f"uid={uid} has validator permit (stake={meta.S[uid]:.2f})")
+        return Result(FAIL, f"uid={uid} does NOT have validator permit (stake={meta.S[uid]:.2f})")
+    except Exception as exc:
+        return Result(FAIL, f"permit check failed: {exc}")
+
+
+def _check_s3_bucket(prefix: str, mode: str = "write") -> Result:
+    """Probe an S3 bucket via a tiny write+read+delete round-trip.
+
+    `prefix` is one of 'GENTRX_VALIDATOR_S3' or 'GENTRX_AGENT_S3'. Uses the
+    environment variables that component expects. Cleans up the probe object.
+    """
+    import uuid
+    endpoint = os.environ.get(f"{prefix}_ENDPOINT_URL", "")
+    bucket = os.environ.get(f"{prefix}_BUCKET", "")
+    ak_env = f"{prefix}_ACCESS_KEY" if mode == "write" else f"{prefix}_READ_ACCESS_KEY"
+    sk_env = f"{prefix}_SECRET_KEY" if mode == "write" else f"{prefix}_READ_SECRET_KEY"
+    # Validator bucket uses WRITE_ACCESS_KEY naming (one historical oddity)
+    if prefix == "GENTRX_VALIDATOR_S3" and mode == "write":
+        ak_env = f"{prefix}_WRITE_ACCESS_KEY"
+        sk_env = f"{prefix}_WRITE_SECRET_KEY"
+    ak = os.environ.get(ak_env, "")
+    sk = os.environ.get(sk_env, "")
+    if not bucket or not ak or not sk:
+        return Result(
+            FAIL,
+            f"{prefix} {mode} creds incomplete: "
+            f"bucket={'✓' if bucket else '✗'} ak={'✓' if ak else '✗'} sk={'✓' if sk else '✗'}",
+        )
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint or None,
+            aws_access_key_id=ak,
+            aws_secret_access_key=sk,
+            region_name=os.environ.get(f"{prefix}_REGION", "auto"),
+            config=BotoConfig(connect_timeout=5, read_timeout=10),
+        )
+        key = f".preflight-probe-{uuid.uuid4().hex[:8]}"
+        if mode == "write":
+            client.put_object(Bucket=bucket, Key=key, Body=b"preflight")
+            client.get_object(Bucket=bucket, Key=key)
+            client.delete_object(Bucket=bucket, Key=key)
+            return Result(PASS, f"{prefix} {mode}: bucket={bucket} (put+get+delete OK)")
+        else:
+            client.head_bucket(Bucket=bucket)
+            return Result(PASS, f"{prefix} {mode}: bucket={bucket} (head OK)")
+    except Exception as exc:
+        return Result(FAIL, f"{prefix} {mode} S3 failed on {bucket}: {exc}")
+
+
+def _check_chain_bucket_commitment(endpoint: str, netuid: int, uid: int, role: str) -> Result:
+    """Read-only: fetch the operator's own chain-committed bucket info.
+
+    role: 'miner' or 'validator' — lookup is the same (by uid), but we
+    customise the message for context.
+    """
+    try:
+        import bittensor as bt
+        from GenTRX.src.chain import GenTRXChain
+        sub = bt.Subtensor(network=endpoint)
+        meta = sub.metagraph(netuid=netuid)
+        chain = GenTRXChain(sub, netuid, meta)
+        bucket = chain.get_bucket(uid)
+        if bucket is None:
+            return Result(
+                FAIL,
+                f"no on-chain bucket commitment for uid={uid} ({role}). "
+                "Will be committed at process startup; re-run preflight after.",
+            )
+        return Result(
+            PASS,
+            f"{role} uid={uid} on-chain bucket: {bucket.bucket_name} @ {bucket.endpoint_url}",
+        )
+    except Exception as exc:
+        return Result(FAIL, f"chain bucket read failed: {exc}")
+
+
+def _check_gradient_server_http(url: str, api_key: str = "") -> Result:
+    """GET /version on the gradient server."""
+    try:
+        import httpx
+        headers = {"X-API-Key": api_key} if api_key else {}
+        r = httpx.get(f"{url.rstrip('/')}/version", headers=headers, timeout=5.0)
+        if r.status_code == 200:
+            return Result(PASS, f"gradient server {url}: version={r.json().get('version', '?')}")
+        return Result(FAIL, f"gradient server {url}: status={r.status_code}")
+    except Exception as exc:
+        return Result(FAIL, f"gradient server {url} unreachable: {exc}")
+
+
+def _check_port_free(port: int, purpose: str) -> Result:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return Result(PASS, f"port {port} free ({purpose})")
+    except OSError as exc:
+        return Result(FAIL, f"port {port} in use ({purpose}): {exc}")
+    finally:
+        s.close()
+
+
+def _check_sim_xml(path: str) -> Result:
+    if not path:
+        return Result(FAIL, "SIM_XML / --simulation.xml_config not set")
+    p = Path(path)
+    if not p.is_file():
+        return Result(FAIL, f"sim XML not found: {path}")
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(p).getroot()
+        if root.tag != "Simulation":
+            return Result(FAIL, f"unexpected root tag: {root.tag}")
+        exchange = root.find(".//MultiBookExchangeAgent")
+        if exchange is None:
+            return Result(WARN, f"{p.name}: no MultiBookExchangeAgent element", required=False)
+        remote_count = exchange.get("remoteAgentCount", "?")
+        return Result(PASS, f"sim XML {p.name}: remoteAgentCount={remote_count}")
+    except Exception as exc:
+        return Result(FAIL, f"sim XML {path} parse failed: {exc}")
+
+
+def _check_disk_free(path: str, min_gb: float) -> Result:
+    from shutil import disk_usage
+    try:
+        usage = disk_usage(path)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_gb:
+            return Result(FAIL, f"{path}: {free_gb:.1f} GB free (need ≥{min_gb:.1f} GB)")
+        return Result(PASS, f"{path}: {free_gb:.1f} GB free")
+    except Exception as exc:
+        return Result(FAIL, f"disk check failed for {path}: {exc}")
+
+
+def _check_wandb() -> Result:
+    """Wandb is optional for GenTRX — missing config is PASS (disabled),
+    misconfigured is WARN (will break silently), healthy is PASS (with info)."""
+    project = os.environ.get("WANDB_PROJECT", "")
+    mode = os.environ.get("WANDB_MODE", "")
+
+    if not project:
+        return Result(PASS, "wandb disabled (WANDB_PROJECT unset — OK for runs without dashboard)", required=False)
+
+    try:
+        import wandb  # noqa: F401
+    except ImportError:
+        return Result(
+            WARN,
+            f"WANDB_PROJECT={project} but wandb not installed (pip install wandb)",
+            required=False,
+        )
+    except Exception as exc:
+        # Catch protobuf VersionError and similar broken-install states —
+        # these also break wandb in the gradient server, not just preflight.
+        return Result(
+            WARN,
+            f"WANDB_PROJECT={project} but `import wandb` fails: "
+            f"{type(exc).__name__}: {exc}. "
+            "Try: pip install -U wandb protobuf",
+            required=False,
+        )
+
+    # Look for creds: either WANDB_API_KEY or entry in ~/.netrc for api.wandb.ai
+    api_key_env = os.environ.get("WANDB_API_KEY", "")
+    has_cloud_netrc = False
+    has_localhost_netrc = False
+    netrc_path = Path(os.environ.get("HOME", "")) / ".netrc"
+    if netrc_path.is_file():
+        try:
+            text = netrc_path.read_text()
+            has_cloud_netrc = "api.wandb.ai" in text
+            has_localhost_netrc = "localhost" in text
+        except Exception:
+            pass
+
+    notes: list[str] = [f"project={project}"]
+    if mode:
+        notes.append(f"mode={mode}")
+
+    if mode == "offline":
+        notes.append("offline → events buffer to wandb/offline-run-*; sync later")
+        return Result(PASS, "  ".join(notes), required=False)
+    if mode == "disabled":
+        return Result(PASS, "wandb DISABLED via WANDB_MODE", required=False)
+
+    if not api_key_env and not has_cloud_netrc:
+        return Result(
+            WARN,
+            f"{project}: no WANDB_API_KEY and ~/.netrc has no api.wandb.ai entry — "
+            "wandb.init will hang or silently fall back to offline",
+            required=False,
+        )
+
+    if has_localhost_netrc:
+        # Stale local-wandb entry left behind. wandb may try it first and
+        # stall in a retry loop before falling through.
+        notes.append("WARN ~/.netrc has 'localhost' entry (stale `wandb local`?) — may cause retry loop")
+        return Result(WARN, "  ".join(notes), required=False)
+
+    return Result(PASS, "  ".join(notes + ["creds OK"]), required=False)
+
+
+# ---------------------------------------------------------------------------
+# Role-specific runners
+# ---------------------------------------------------------------------------
+
+
+def _common_checks(args: argparse.Namespace) -> list[tuple[str, Result]]:
+    """Checks applicable to every role."""
+    results: list[tuple[str, Result]] = []
+    real_chain = args.env in ("mainnet", "testnet")
+
+    results.append(("python deps", _check_python_deps(
+        ["bittensor", "torch", "boto3", "msgpack", "httpx", "fastapi"]
+    )))
+    results.append(("subtensor RPC", _check_subtensor(args.chain_endpoint)))
+    results.append(("wallet readable", _check_wallet(
+        args.wallet_path, args.wallet_name, args.wallet_hotkey
+    )))
+    results.append(("registration", _check_registered(
+        args.chain_endpoint, args.netuid,
+        args.wallet_path, args.wallet_name, args.wallet_hotkey
+    )))
+
+    # Resolve UID + permit from metagraph (best-effort; may fail if not
+    # registered).
+    try:
+        import bittensor as bt
+        sub = bt.Subtensor(network=args.chain_endpoint)
+        w = bt.Wallet(path=args.wallet_path, name=args.wallet_name, hotkey=args.wallet_hotkey)
+        args._hotkey_ss58 = w.hotkey.ss58_address
+        args._uid = sub.get_uid_for_hotkey_on_subnet(w.hotkey.ss58_address, netuid=args.netuid)
+    except Exception:
+        args._uid = None
+        args._hotkey_ss58 = None
+
+    if args.role == "validator":
+        results.append(("validator permit", _check_validator_permit(
+            args.chain_endpoint, args.netuid, args._hotkey_ss58 or "", real_chain
+        )))
+    return results
+
+
+def _validator_checks(args: argparse.Namespace) -> list[tuple[str, Result]]:
+    results: list[tuple[str, Result]] = []
+    results.append(("taosim binary", _check_taosim_binary()))
+    results.append(("sim XML", _check_sim_xml(args.sim_xml)))
+    if not args.skip_ports:
+        results.append(("port 8000 (validator FastAPI)", _check_port_free(8000, "validator FastAPI")))
+    results.append(("disk free", _check_disk_free(args.checkpoint_dir, min_gb=5.0)))
+
+    if args.gentrx_enabled:
+        results.append(("GENTRX env vars", _check_env_vars([
+            "GENTRX_VALIDATOR_S3_BUCKET",
+            "GENTRX_VALIDATOR_S3_WRITE_ACCESS_KEY",
+            "GENTRX_VALIDATOR_S3_WRITE_SECRET_KEY",
+            "GENTRX_VALIDATOR_S3_READ_ACCESS_KEY",
+            "GENTRX_VALIDATOR_S3_READ_SECRET_KEY",
+        ])))
+        results.append(("validator S3 bucket (write)", _check_s3_bucket("GENTRX_VALIDATOR_S3", "write")))
+        if args.gradient_server_url:
+            results.append(("gradient server HTTP", _check_gradient_server_http(
+                args.gradient_server_url,
+                os.environ.get("GENTRX_API_KEY", ""),
+            )))
+        if args.env in ("mainnet", "testnet") and args._uid is not None:
+            results.append(("chain bucket commitment", _check_chain_bucket_commitment(
+                args.chain_endpoint, args.netuid, args._uid, "validator"
+            )))
+        results.append(("wandb config", _check_wandb()))
+    return results
+
+
+def _miner_checks(args: argparse.Namespace) -> list[tuple[str, Result]]:
+    results: list[tuple[str, Result]] = []
+    results.append(("GENTRX agent env vars", _check_env_vars([
+        "GENTRX_AGENT_S3_BUCKET",
+        "GENTRX_AGENT_S3_ACCESS_KEY",
+        "GENTRX_AGENT_S3_SECRET_KEY",
+        "GENTRX_AGENT_S3_READ_ACCESS_KEY",
+        "GENTRX_AGENT_S3_READ_SECRET_KEY",
+    ])))
+    results.append(("miner S3 bucket (write)", _check_s3_bucket("GENTRX_AGENT_S3", "write")))
+
+    if args.env in ("mainnet", "testnet") and args._uid is not None:
+        results.append(("chain bucket commitment", _check_chain_bucket_commitment(
+            args.chain_endpoint, args.netuid, args._uid, "miner"
+        )))
+    return results
+
+
+def _gradient_server_checks(args: argparse.Namespace) -> list[tuple[str, Result]]:
+    results: list[tuple[str, Result]] = []
+    results.append(("GENTRX env vars", _check_env_vars([
+        "GENTRX_VALIDATOR_S3_BUCKET",
+        "GENTRX_VALIDATOR_S3_WRITE_ACCESS_KEY",
+        "GENTRX_VALIDATOR_S3_WRITE_SECRET_KEY",
+    ])))
+    results.append(("validator S3 bucket (write)", _check_s3_bucket("GENTRX_VALIDATOR_S3", "write")))
+    if not args.skip_ports:
+        results.append(("port 8100 (gradient server HTTP)", _check_port_free(8100, "gradient server")))
+    results.append(("disk free", _check_disk_free(args.checkpoint_dir, min_gb=5.0)))
+    results.append(("wandb config", _check_wandb()))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+# Per-environment defaults. The chain shortcuts (`local`, `test`, `finney`)
+# are bittensor SDK names; `bt.Subtensor(network=…)` resolves them to the
+# canonical websocket URL at connect time. User overrides win via flag or
+# env var; these fill in only when the user did not specify one. `testnet`
+# has no project default netuid because it depends on team registration.
+_ENV_DEFAULTS = {
+    "localnet": {
+        "chain_endpoint": "local",
+        "netuid": 1,
+    },
+    "testnet": {
+        "chain_endpoint": "test",
+        "netuid": 79,
+    },
+    "mainnet": {
+        "chain_endpoint": "finney",
+        "netuid": 79,
+    },
+}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--role", required=True, choices=["validator", "miner", "gradient-server"])
+    parser.add_argument("--env", required=True, choices=["localnet", "testnet", "mainnet"])
+    parser.add_argument("--gentrx-enabled", action="store_true",
+                        help="(validator role) also check GenTRX prerequisites")
+    parser.add_argument("--chain-endpoint", default=None,
+                        help="subtensor websocket endpoint (default: derived from --env; "
+                             "override via flag or SUBTENSOR_ENDPOINT env var)")
+    parser.add_argument("--netuid", type=int, default=None,
+                        help="subnet netuid (default: derived from --env, "
+                             "1 for localnet and 79 for testnet/mainnet)")
+    parser.add_argument("--wallet-path", default=os.environ.get("WALLET_PATH", f"{os.environ.get('HOME','')}/.bittensor/wallets"))
+    parser.add_argument("--wallet-name", default=os.environ.get("WALLET_NAME", "validator0"))
+    parser.add_argument("--wallet-hotkey", default=os.environ.get("WALLET_HOTKEY", "default"))
+    parser.add_argument("--sim-xml", default=os.environ.get("SIM_XML", ""))
+    parser.add_argument("--gradient-server-url", default=os.environ.get("GRADIENT_SERVER_URL", ""))
+    parser.add_argument("--checkpoint-dir", default=os.environ.get("CHECKPOINT_DIR", "./checkpoints"))
+    parser.add_argument("--skip-ports", action="store_true",
+                        help="skip localhost port-free checks (useful in containers)")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args()
+
+    # Layer the chain endpoint and netuid: explicit flag → env var → env-default.
+    defaults = _ENV_DEFAULTS[args.env]
+    if args.chain_endpoint is None:
+        args.chain_endpoint = os.environ.get("SUBTENSOR_ENDPOINT") or defaults["chain_endpoint"]
+    if args.netuid is None:
+        netuid_env = os.environ.get("NETUID")
+        if netuid_env:
+            args.netuid = int(netuid_env)
+        elif defaults["netuid"] is not None:
+            args.netuid = defaults["netuid"]
+        else:
+            parser.error(
+                f"--netuid is required for env={args.env} (no default configured); "
+                "pass --netuid <n> or set NETUID in the environment"
+            )
+
+    print(f"[preflight] role={args.role} env={args.env} netuid={args.netuid}")
+    print(f"[preflight] chain={args.chain_endpoint}")
+    print(f"[preflight] wallet={args.wallet_path}/{args.wallet_name}/{args.wallet_hotkey}")
+    if args.role == "validator" and args.gentrx_enabled:
+        print(f"[preflight] GenTRX: enabled, gradient_server_url={args.gradient_server_url or '(not set)'}")
+    print()
+
+    # Collect all results, then render + exit non-zero on any required FAIL
+    results: list[tuple[str, Result]] = []
+    try:
+        results.extend(_common_checks(args))
+        if args.role == "validator":
+            results.extend(_validator_checks(args))
+        elif args.role == "miner":
+            results.extend(_miner_checks(args))
+        elif args.role == "gradient-server":
+            results.extend(_gradient_server_checks(args))
+    except Exception:
+        traceback.print_exc()
+        return 2
+
+    # Render
+    name_width = max(len(n) for n, _ in results) if results else 0
+    fail_count = 0
+    warn_count = 0
+    for name, r in results:
+        print(f"  {_badge(r.status)}  {name:<{name_width}}   {r.message}")
+        if r.status == FAIL and r.required:
+            fail_count += 1
+        elif r.status == WARN:
+            warn_count += 1
+
+    print()
+    if fail_count:
+        print(f"{_RED()}[preflight] {fail_count} required check(s) failed.{_RESET()}")
+        return 1
+    if warn_count:
+        print(f"{_YELLOW()}[preflight] all required checks passed ({warn_count} warnings).{_RESET()}")
+    else:
+        print(f"{_GREEN()}[preflight] all checks passed.{_RESET()}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

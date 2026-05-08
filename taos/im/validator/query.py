@@ -362,8 +362,12 @@ class QueryService:
 
             def create_axon_synapse(uid):
                 synapse = MarketSimulationStateUpdate.parse_dict(request_data)
-                object.__setattr__(synapse, "accounts", {uid: synapse.accounts[uid]})
-                object.__setattr__(synapse, "notices", {uid: synapse.notices[uid]})
+                # Benchmark miners (UIDs >= metagraph.n) are not simulation agents,
+                # so the simulator never sends account/notice data for them.
+                accounts = synapse.accounts or {}
+                notices = synapse.notices or {}
+                object.__setattr__(synapse, "accounts", {uid: accounts[uid]} if uid in accounts else {})
+                object.__setattr__(synapse, "notices", {uid: notices[uid]} if uid in notices else {uid: []})
                 object.__setattr__(synapse, "config", request_data['config'])
                 synapse.version = request_data['version']
                 return synapse
@@ -450,6 +454,13 @@ class QueryService:
                 )
                 for task in pending:
                     task.cancel()
+                # Drain the cancellations so each task's CancelledError
+                # handler runs (and finishes touching axon_synapses) before
+                # the outer scope unbinds the closure cell at end-of-function.
+                # Without this await, those handlers hit a NameError on
+                # axon_synapses[uid] after `del axon_synapses` fires below.
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
                 pending = set()
 
             bt.logging.info(f"Wait completed: {len(done)} done, {len(pending)} pending in {elapsed:.4f}s")
@@ -468,6 +479,9 @@ class QueryService:
                 bt.logging.warning(f"Cancelling {len(pending)} pending tasks")
                 for task in pending:
                     task.cancel()
+                # Drain so cancelled tasks' handlers complete before the
+                # `del axon_synapses` below unbinds their closure cell.
+                await asyncio.gather(*pending, return_exceptions=True)
 
             missing_count = 0
             for index, uid in enumerate(uid_list):

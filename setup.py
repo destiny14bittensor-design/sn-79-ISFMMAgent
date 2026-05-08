@@ -72,7 +72,7 @@ setup(
     include_package_data=True,
     author_email="to@taos.im",
     license="MIT",
-    python_requires="==3.10.9",
+    python_requires=">=3.10",
     install_requires=requirements,
     classifiers=[
         "Development Status :: 3 - Alpha",

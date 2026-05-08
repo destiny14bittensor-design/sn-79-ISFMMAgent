@@ -10,6 +10,7 @@
 #include <fmt/format.h>
 
 #include <CLI/CLI.hpp>
+#include <cstdio>
 #ifdef OVERRIDE_NEW_DELETE
 #include <mimalloc-new-delete.h>
 #endif
@@ -18,6 +19,9 @@
 
 int main(int argc, char* argv[])
 {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::setvbuf(stderr, nullptr, _IOLBF, 0);
+
     CLI::App app{"ExchangeSimulator v2.0"};
 
     auto initGroup = app.add_option_group("Init");

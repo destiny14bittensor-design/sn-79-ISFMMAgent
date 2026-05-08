@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+WebSocket stream helpers for Coinbase and Binance: connection management,
+health monitoring, and optional periodic trade sampling.
+"""
 
 import json
 import time
@@ -21,7 +25,8 @@ def connect_coinbase(symbols: list[str], on_trade: Callable[[dict], None]) -> Tu
         on_trade (Callable[[dict], None]): Callback function invoked for each trade received.
 
     Returns:
-        CoinbaseClient: The WebSocket client instance connected to Coinbase.
+        Tuple[CoinbaseClient | None, Exception | None]: The connected client and None
+            on success, or (None, exception) if the connection fails.
     """
     try:
         def on_coinbase_message(message: str) -> None:
@@ -167,7 +172,8 @@ def connect_binance(symbols, on_trade: Callable[[dict], None]) -> Tuple[BinanceC
         on_trade (Callable[[dict], None]): Callback invoked for each trade message.
 
     Returns:
-        BinanceClient: The Binance WebSocket client instance.
+        Tuple[BinanceClient | None, Exception | None]: The connected client and None
+            on success, or (None, exception) if the connection fails.
     """
     try:
         def on_binance_message(_, message: str) -> None:

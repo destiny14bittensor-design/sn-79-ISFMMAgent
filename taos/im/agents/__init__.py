@@ -1002,3 +1002,11 @@ class StateHistoryManager:
             bt.logging.info(f"No history file found at {self.state_file}. Initializing empty history.")
             self.last_snapshot = {}
             self.history = {}
+
+# GenTRXAgent extends FinanceSimulationAgent with distributed training.
+# Import is deferred to end of file to avoid the circular-import that would
+# result from gentrx.py importing FinanceSimulationAgent from this module.
+try:
+    from taos.im.agents.gentrx import GenTRXAgent  # noqa: F401
+except ImportError:
+    pass  # GenTRX optional dependencies (torch, boto3, etc.) not installed

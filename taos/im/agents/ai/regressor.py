@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Scikit-learn regressor agent: online-learning finance simulation agent using
+PassiveAggressiveRegressor, SGDRegressor, or MLPRegressor for order decisions.
+"""
 
 from copy import deepcopy
 import glob

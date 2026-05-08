@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Coinbase WebSocket client wrapper: patches open_async and _is_websocket_open
+for compatibility with the current websockets library version.
+"""
 import websockets
 import asyncio
 import ssl
@@ -12,10 +16,9 @@ from coinbase.constants import USER_AGENT
 logger = get_logger("coinbase.WSClient")
 from coinbase.websocket.websocket_base import WSBase, WSClientException
 
-"""
-Class overriding the base Coinbase WS implementation to allow modificatiosn as needed.
-"""
+
 class CoinbaseClient(WSBase):
+    """Override the base Coinbase WebSocket client for compatibility with the latest websockets library."""
     async def open_async(self) -> None:
         """
         Open the websocket client connection asynchronously.  

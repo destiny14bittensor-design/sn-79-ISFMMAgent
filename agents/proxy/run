@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Launch proxy test: proxy + agents + simulator [+ MinIO + gradient server in GenTRX mode]
+#
+# Usage:
+#   ./agents/proxy/run [--no-gentrx] <simulation_xml>
+#
+# Modes:
+#   (default)    Full GenTRX loop: proxy + simulator + agents + MinIO + gradient server
+#   --no-gentrx  Trading only:     proxy + simulator + agents (no S3, no gradient server)
+#
+# Stop:
+#   tmux kill-session -t proxy_test
+#   kill $(cat /tmp/gentrx_minio.pid) 2>/dev/null          # standalone binary (GenTRX mode)
+#   docker stop gentrx_minio && docker rm gentrx_minio      # Docker fallback (GenTRX mode)
+
+set -e
+
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+G=$(realpath "$SCRIPT_DIR/../..")
+
+GENTRX=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-gentrx) GENTRX=0; shift ;;
+        *) break ;;
+    esac
+done
+
+# ---- Environment ----
+ENV_FILE="$G/.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: .env not found at $ENV_FILE"
+    echo "Copy .env.example to .env and fill in your paths."
+    exit 1
+fi
+source "$ENV_FILE"
+
+export PATH="$TAOS_BUILD/src/cpp:$PATH"
+
+SIM_XML="${1:-}"
+if [[ -z "$SIM_XML" ]]; then
+    echo "Usage: $0 [--no-gentrx] <simulation_xml>"
+    exit 1
+fi
+SIM_XML="$(realpath "$SIM_XML")"
+[[ -f "$SIM_XML" ]] || { echo "ERROR: XML not found: $SIM_XML"; exit 1; }
+
+# Venv
+if [[ -n "$VIRTUAL_ENV" ]]; then
+    VENV="$VIRTUAL_ENV/bin/activate"
+elif [[ -n "$TAOS_VENV" && -d "$TAOS_VENV" ]]; then
+    VENV="$TAOS_VENV/bin/activate"
+else
+    echo "ERROR: No active venv and TAOS_VENV not set in .env"
+    exit 1
+fi
+
+command -v tmux &>/dev/null || { echo "ERROR: tmux not found"; exit 1; }
+command -v taosim &>/dev/null || echo "WARNING: taosim not in PATH (check TAOS_BUILD in .env)"
+
+# ---- GenTRX: MinIO (local S3) ----
+if [[ "$GENTRX" = "1" ]]; then
+    _MINIO_BIN="${TAOS_MINIO_BIN:-}"
+    [[ -z "$_MINIO_BIN" ]] && command -v minio &>/dev/null && _MINIO_BIN="minio"
+    if [[ -z "$_MINIO_BIN" ]] && ! command -v docker &>/dev/null; then
+        echo "WARNING: neither 'minio' binary nor 'docker' found — setup_minio will fail"
+        echo "  Install: curl -o ~/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && chmod +x ~/bin/minio"
+    fi
+    source "$SCRIPT_DIR/setup_minio"
+    source "$SCRIPT_DIR/wipe_bucket"
+fi
+
+# ---- Generate config ----
+CONFIG="$SCRIPT_DIR/config.json"
+mkdir -p "$G/data/proxy_test"
+
+GENTRX_ROOT="$G" TAOS_PROXY="$TAOS_PROXY" TAOS_BUILD="$TAOS_BUILD" \
+    python3 "$G/GenTRX/src/util/gen_config.py" \
+        --sim-xml "$SIM_XML" \
+        --grad-port 8100 \
+        --output "$CONFIG" \
+        --n-agents 2
+
+# ---- Launch ----
+GENTRX_FLAG="--no-gentrx"
+[[ "$GENTRX" = "1" ]] && GENTRX_FLAG="--gentrx"
+
+"$SCRIPT_DIR/launcher" \
+    --config "$CONFIG" \
+    --venv "$VENV" \
+    "$GENTRX_FLAG"

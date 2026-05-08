@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Finance event classes: simulation lifecycle, order placement, trade, cancellation,
+and position-close events for the intelligent markets protocol.
+"""
 from taos.common.protocol import BaseModel
 from pydantic import Field
 from typing import Literal
@@ -9,11 +13,16 @@ from taos.im.utils import duration_from_timestamp
 from taos.im.protocol.models import LoanSettlementOption, OrderCurrency
 
 
-"""
-Classes representing events occurring in the simulation are defined here.
-"""
-
 def abbreviate(type_name : str):
+    """
+    Return an abbreviation of an underscore-separated type name using initial letters.
+
+    Args:
+        type_name (str): Underscore-separated type name, e.g. 'EVENT_TRADE'.
+
+    Returns:
+        str: Concatenated initials, e.g. 'ET'.
+    """
     return ''.join([s[0] for s in type_name.split('_')])
 class FinanceEvent(SimulationEvent):
     """

@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Rayleigh Research <to@rayleigh.re>
 # SPDX-License-Identifier: MIT
+"""
+Validator self-update helpers: git repo checking, Python package reinstall,
+C++ simulator rebuild, and simulator process lifecycle management.
+"""
 import time
 import traceback
 import json
@@ -17,11 +21,14 @@ from taos.im.neurons.validator import Validator
         
 def check_repo(self : Validator) -> Tuple[bool, bool, bool, bool]:
     """
-    Check repository for updates with timeout protection.
-    
+    Check the git repository for updates with timeout protection.
+
+    Args:
+        self (Validator): The intelligent markets simulation validator.
+
     Returns:
         Tuple[bool, bool, bool, bool]: (validator_py_changed, simulator_config_changed,
-                                        simulator_py_changed, simulator_cpp_changed)
+            simulator_py_changed, simulator_cpp_changed). All False on error.
     """
     check_timeout = 30.0
     try:
@@ -81,7 +88,17 @@ def check_repo(self : Validator) -> Tuple[bool, bool, bool, bool]:
 
 def update_validator(self : Validator) -> None:
     """
-    Updates, installs and restarts validator with timeout protection.
+    Pull the latest code, reinstall the package, and restart the validator process.
+
+    Attempts a PM2-managed restart first; falls back to killing the Python process
+    directly if PM2 is not available.
+
+    Args:
+        self (Validator): The intelligent markets simulation validator.
+
+    Raises:
+        subprocess.TimeoutExpired: If the restart command exceeds 30 s.
+        Exception: On any other pip install or process-management failure.
     """
     try:
         py_cmd = ["pip", "install", "-e", "."]
@@ -176,7 +193,17 @@ def update_validator(self : Validator) -> None:
 
 def rebuild_simulator(self : Validator) -> None:
     """
-    Re-compiles the C++ simulator with timeout protection.
+    Recompile the C++ simulator and reinstall its Python bindings.
+
+    Runs cmake + cmake --build using g++-14, then reinstalls the Python
+    package from simulate/trading.
+
+    Args:
+        self (Validator): The intelligent markets simulation validator.
+
+    Raises:
+        subprocess.TimeoutExpired: If any subprocess exceeds its timeout.
+        Exception: On cmake, build, or pip install failures.
     """
     try:
         gcc_version_proc = subprocess.run(
@@ -273,7 +300,20 @@ def rebuild_simulator(self : Validator) -> None:
 
 def restart_simulator(self : Validator, end : bool = False) -> None:
     """
-    Restarts the C++ simulator process with timeout protection and checkpoint resume.
+    Stop the running simulator and start a new one, optionally resuming from checkpoint.
+
+    Kills any existing PM2 or bare simulator process, then attempts to resume
+    from the latest checkpoint unless `end` is True or the checkpoint fails health
+    check, in which case a fresh simulation is started from the config file.
+
+    Args:
+        self (Validator): The intelligent markets simulation validator.
+        end (bool): If True, skip checkpoint resume and start a new simulation.
+            Defaults to False.
+
+    Raises:
+        subprocess.TimeoutExpired: If any subprocess exceeds its timeout.
+        Exception: On any process-management failure.
     """
     try:
         try:
@@ -401,10 +441,17 @@ def restart_simulator(self : Validator, end : bool = False) -> None:
 
 def check_simulator(self : Validator) -> bool:
     """
-    Check if the simulator process is still running with timeout protection.
-    
+    Check whether the simulator process is alive and healthy.
+
+    Returns True immediately if `last_state_time` indicates a recent heartbeat.
+    Otherwise queries PM2 for status, then falls back to scanning the process
+    table for the taosim binary.
+
+    Args:
+        self (Validator): The intelligent markets simulation validator.
+
     Returns:
-        bool: True if simulator is healthy, False otherwise
+        bool: True if the simulator is healthy, False otherwise.
     """
     try:
         if not self.last_state_time or self.last_state_time >= time.time() - 300:

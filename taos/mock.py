@@ -46,7 +46,7 @@ class MockMetagraph(bt.Metagraph):
         self.sync(subtensor=subtensor)
 
         for axon in self.axons:
-            axon.ip = "127.0.0.0"
+            axon.ip = "127.0.0.1"
             axon.port = 8091
 
         bt.logging.info(f"Metagraph: {self}")
