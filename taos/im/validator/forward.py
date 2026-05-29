@@ -194,6 +194,22 @@ async def forward(self, synapse: MarketSimulationStateUpdate) -> List[FinanceAge
             except (posix_ipc.BusyError, asyncio.TimeoutError):
                 pass
             bt.logging.info(f"Drained Query Response Queue ({time.time()-query_start:.4f}s).")
+            
+            # Drain stale completion bytes from the notification pipe. The query service
+            # can finish a cycle before the validator loops back around; the b'1' sits in
+            # the pipe and would be read as an instant (false) completion on the next send.
+            drained_pipe = 0
+            try:
+                while True:
+                    data = os.read(self.query_notify_read, 1)
+                    if data:
+                        drained_pipe += 1
+                    else:
+                        break
+            except (BlockingIOError, OSError):
+                pass
+            if drained_pipe > 0:
+                bt.logging.warning(f"Drained {drained_pipe} stale pipe notification(s) before query")
 
             write_start = time.time()
             data_bytes = pickle.dumps(request_data, protocol=5)

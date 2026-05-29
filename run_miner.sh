@@ -1,5 +1,9 @@
 #!/bin/bash
 set -e
+# See run_validator.sh: set before any python launch so bittensor 10.3.2's
+# import-time logging singleton isn't built with an empty config (which silently
+# disables logging). pm2 captures it; spawned subprocesses inherit it.
+export BT_NO_PARSE_CLI_ARGS=false
 # run_miner.sh — launch MVTRX miner
 #
 # Pass -G to enable GenTRX distributed training:
@@ -37,7 +41,10 @@ _EXPLICIT_AGENT=0
 _EXPLICIT_PARAMS=0
 _EXPLICIT_GENTRX_PARAMS=0
 
-[ -f "$REPO_ROOT/.env" ] && . "$REPO_ROOT/.env"
+# set -a auto-exports every var the sourced file sets, so pm2 (and any other
+# child process) inherits them. Plain `. .env` would only populate this
+# script's shell vars.
+[ -f "$REPO_ROOT/.env" ] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
 while getopts e:p:w:h:u:a:g:n:m:t:l:G flag; do
     case "${flag}" in

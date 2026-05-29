@@ -1,5 +1,12 @@
 #!/bin/bash
 set -e
+# bittensor 10.3.2's LoggingMachine.config() returns an empty config when
+# BT_NO_PARSE_CLI_ARGS is not "false" at `import bittensor` time, which silently
+# disables the main process's logging. Set it here (before any python launch)
+# so it's in the env before the import-time logging singleton is built; pm2
+# captures it for restarts and spawned subprocesses inherit it. Pinned to
+# <10.3.2 in requirements.txt, but this keeps 10.3.2 usable if the pin is lifted.
+export BT_NO_PARSE_CLI_ARGS=false
 # run_validator.sh — launch MVTRX validator + simulator
 #
 # GenTRX distributed training (optional):
@@ -43,7 +50,12 @@ GRAD_CORES_COUNT="${GRAD_CORES_COUNT:-0}"
 # Track explicit CLI flags so they override saved config
 _EXPLICIT_GRAD_URL=0
 
-[ -f "$REPO_ROOT/.env" ] && . "$REPO_ROOT/.env"
+# set -a auto-exports every var the sourced file sets, so pm2 (and any other
+# child process) inherits them. Plain `. .env` would only populate this
+# script's shell vars, leaving GENTRX_VALIDATOR_S3_* invisible to pm2 — which
+# silently skips the on-chain bucket commitment in validator.py and breaks
+# miner-side aggregator discovery.
+[ -f "$REPO_ROOT/.env" ] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
 # Normalize -G: if passed without a recognised mode value, default to 'sibling'.
 # This allows `./run_validator.sh -G` without an explicit 'sibling' argument.
@@ -139,6 +151,18 @@ cd "$REPO_ROOT"
 git pull || { echo "WARNING: git pull failed (no tracking branch?). Continue without updating? [y/N]"; read -r _yn; [ "$_yn" = "y" ] || exit 1; }
 pip install -e .
 
+# scalecodec ↔ cyscale conflict: bittensor's transitive deps drag py-scale-codec
+# (PyPI package `scalecodec`) back in on every `pip install -e .`, even though
+# we want cyscale to provide the `scalecodec` namespace. Both installed at once
+# → async_substrate_interface raises a RuntimeError at `import bittensor` time
+# and the validator never starts. Detect by trying to import bittensor; on
+# failure, uninstall both and force-reinstall cyscale. Idempotent.
+if ! python -c "import bittensor" >/dev/null 2>&1; then
+    echo "Repairing scalecodec/cyscale conflict (bittensor import failed)"
+    pip uninstall -y scalecodec cyscale 2>/dev/null || true
+    pip install --force-reinstall --no-cache-dir cyscale
+fi
+
 # ── simulator build ────────────────────────────────────────────────────────────
 if [ "$PRESERVE_SIMULATOR" = "0" ]; then
     echo "Updating Simulator"
@@ -161,10 +185,19 @@ if [ "$PRESERVE_SIMULATOR" = "0" ]; then
         echo "Commit hash matches. No reset needed."
     fi
     cd ..
+    # Cap build parallelism by available RAM (g++ uses ~2 GB per translation
+    # unit for the simulator's heavy templates). Without this, -j$(nproc) on
+    # a low-memory box OOMs mid-build.
+    MEM_MB=$(free -m | awk '/^Mem:/{print $7}')
+    MEM_JOBS=$(( MEM_MB / 2048 ))
+    MEM_JOBS=$(( MEM_JOBS < 1 ? 1 : MEM_JOBS ))
+    NPROC=$(nproc)
+    BUILD_JOBS=$(( MEM_JOBS < NPROC ? MEM_JOBS : NPROC ))
+    echo "Build parallelism: -j $BUILD_JOBS  (${MEM_MB}MB free, ${NPROC} cores)"
     if ! g++ -dumpversion | grep -q "14"; then
-        cd build && cmake -DENABLE_TRACES=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 .. && cmake --build . -j "$(nproc)"
+        cd build && cmake -DENABLE_TRACES=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++-14 .. && cmake --build . -j "$BUILD_JOBS"
     else
-        cd build && cmake -DENABLE_TRACES=1 -DCMAKE_BUILD_TYPE=Release .. && cmake --build . -j "$(nproc)"
+        cd build && cmake -DENABLE_TRACES=1 -DCMAKE_BUILD_TYPE=Release .. && cmake --build . -j "$BUILD_JOBS"
     fi
     cd "$REPO_ROOT/taos/im/neurons"
 else
@@ -637,6 +670,11 @@ pm2 start validator.py \
     -- \
     --netuid "$NETUID" \
     --subtensor.chain_endpoint "$ENDPOINT" \
+    $( case "$ENDPOINT" in
+        *entrypoint-finney.opentensor.ai*) echo "--subtensor.network finney" ;;
+        *test.finney.opentensor.ai*)       echo "--subtensor.network test"   ;;
+        *) ;;  # custom endpoint → don't set network at all; chain_endpoint drives connection
+    esac ) \
     --wallet.path "$WALLET_PATH" \
     --wallet.name "$WALLET_NAME" \
     --wallet.hotkey "$HOTKEY_NAME" \

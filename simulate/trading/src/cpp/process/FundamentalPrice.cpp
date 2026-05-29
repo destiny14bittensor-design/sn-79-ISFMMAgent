@@ -21,6 +21,7 @@ FundamentalPrice::FundamentalPrice(const FundamentalPriceDesc& desc) noexcept
       m_rng{&dynamic_cast<Simulation*>(desc.simulation)->rng()},
       m_bookId{desc.bookId},
       m_seedInterval{desc.seedInterval},
+      m_gracePeriod{desc.gracePeriod},
       m_mu{desc.mu},
       m_sigma{desc.sigma},
       m_dt{desc.dt},
@@ -83,10 +84,14 @@ void FundamentalPrice::update(Timestamp timestamp)
                     std::mt19937 gen(rd());
                     std::uniform_int_distribution<> distr(-50, 50);
                     seed = m_state.lastSeed + distr(gen);
-                    fmt::println("WARNING : Fundamental price seed not updated - using random seed.  Last Count {} | Count {} | Last Seed {} | Seed {}", m_state.lastCount, count, seed, m_state.lastSeed);
+                    if (timestamp >= m_gracePeriod) {
+                        fmt::println("WARNING : Fundamental price seed not updated - using random seed.  Last Count {} | Count {} | Last Seed {} | Seed {}", m_state.lastCount, count, seed, m_state.lastSeed);
+                    }
                 }
             } else {
-                fmt::println("FundamentalPrice::update : NO SEED FILE PRESENT AT {}.  Using random seed.", m_seedfile);
+                if (timestamp >= m_gracePeriod) {
+                    fmt::println("FundamentalPrice::update : NO SEED FILE PRESENT AT {}.  Using random seed.", m_seedfile);
+                }
                 std::random_device rd;
                 std::mt19937 gen(rd());
                 std::uniform_int_distribution<> distr(10800000,11200000);
@@ -163,6 +168,11 @@ std::unique_ptr<FundamentalPrice> FundamentalPrice::fromXML(
     const double hurst = node.attribute("Hurst").as_double(0.5);
     const double epsilon = node.attribute("epsilon").as_double(0.0);
 
+    // XML structure: <MultiBookExchangeAgent gracePeriod=...><Books><Processes><FundamentalPrice/>
+    // Walk up 3 levels to find gracePeriod.
+    const Timestamp gracePeriod =
+        node.parent().parent().parent().attribute("gracePeriod").as_ullong();
+
     return std::make_unique<FundamentalPrice>(FundamentalPriceDesc{
         .simulation = simulation,
         .bookId = bookId,
@@ -176,6 +186,7 @@ std::unique_ptr<FundamentalPrice> FundamentalPrice::fromXML(
         .sigmaJump = getNonNegativeFloatAttribute(node, "sigmaJump"),
         .hurst = hurst,
         .epsilon = epsilon,
+        .gracePeriod = gracePeriod,
         .proc = {
             .updatePeriod = updatePeriod
         },

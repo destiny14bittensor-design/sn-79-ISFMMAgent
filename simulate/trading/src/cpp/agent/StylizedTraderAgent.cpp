@@ -288,8 +288,10 @@ void StylizedTraderAgent::configure(const pugi::xml_node& node)
 
     for (BookId bookId = 0; bookId < m_bookCount; ++bookId) {
         m_topLevel.push_back(TopLevel{});
-        GBMValuationModel gbmPrice{m_price0, gbmMu, gbmSigma, gbmSeed + bookId + 1};
-        const auto Xt = gbmPrice.generatePriceSeries(1, 86400);
+        // Identical path is computed by every StylizedTraderAgent instance for
+        // the same (seed, S0, mu, sigma, N) — share via the simulation-level cache.
+        const auto& Xt = simulation()->getOrComputeGbmPath(
+            gbmSeed + bookId + 1, m_price0, gbmMu, gbmSigma, 86400);
         double price = Xt[86400-1];
         
         uint64_t stepLen = m_tau / 1'000'000'000;

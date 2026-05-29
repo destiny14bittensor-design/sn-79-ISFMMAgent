@@ -606,6 +606,23 @@ class GenTRXService:
         if not miner_uids:
             return {}
 
+        # Clamp sample range to the actually-available data window. Without
+        # this, a sim-transition cleanup that wipes parquets below some
+        # sim-time leaves the validator picking ts_start in [0, max_start] —
+        # most beta samples land in the wiped zone, no parquets overlap, and
+        # every miner gets data=[] until sim-time grows large enough that
+        # 0.75 * max_start crosses the cleanup floor (~12 sim-hr at 5-min
+        # windows). On a fresh run min_data_ts ≈ 0 and this is a no-op.
+        min_data_ts = max_start  # fallback: collapse to top of range
+        for _book_info in books.values():
+            for _item in _book_info.get("parquets", []):
+                if isinstance(_item, (list, tuple)) and len(_item) == 3:
+                    _f_start = _item[1]
+                    if _f_start < min_data_ts:
+                        min_data_ts = _f_start
+        sample_floor = min(min_data_ts, max_start)
+        sample_range = max(0, max_start - sample_floor)
+
         # Resolve data bucket credentials from gradient server's validator store
         # (embedded in the assignment so miners don't need pre-configuration)
         # These come from the data-status response or from env vars
@@ -623,7 +640,7 @@ class GenTRXService:
             beta_sample = 1.0 - miner_rng.betavariate(
                 self.DEFAULT_BETA_ALPHA, self.DEFAULT_BETA_BETA
             )
-            ts_start = int(beta_sample * max_start)
+            ts_start = sample_floor + int(beta_sample * sample_range)
             ts_end = ts_start + self._window_ns
 
             start = (miner_uid * self._books_per_miner) % len(shuffled)

@@ -1,4 +1,4 @@
-bittensor>=9.4.0
+bittensor==10.4.0
 torch>=2.7.0
 loguru
 prometheus_client

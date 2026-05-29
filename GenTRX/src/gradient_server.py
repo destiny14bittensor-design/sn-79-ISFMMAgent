@@ -48,8 +48,14 @@ logger = logging.getLogger("GenTRX.src.gradient_server")
 def _tag_to_ns(tag: str) -> int:
     """Convert ddHHMMSS tag back to nanoseconds.
 
-    Also handles plain integer strings (sim format fallback).
+    Also handles plain integer strings (sim format fallback) and an optional
+    `_NNNN` disambiguating suffix that `_flush_book_parquet` appends when
+    multiple flushes share the same sim-second tag (cap-triggered flushes
+    within one second). The suffix is stripped here so downstream filtering
+    is unaffected.
     """
+    if "_" in tag:
+        tag = tag.split("_", 1)[0]
     if len(tag) == 8:
         dd = int(tag[0:2])
         hh = int(tag[2:4])
@@ -193,6 +199,7 @@ class GradientAggregator:
         validator_store: GradientStore | None = None,
         is_aggregator: bool = True,
         parquet_interval_ns: int = 300_000_000_000,  # 5 min, matches training window
+        max_pending_rows_per_book: int = 50_000,
         loop_sleep_s: float = 5.0,
         round_grace_s: float = 30.0,
         max_gradient_bytes: int = 10 * 1024 * 1024,
@@ -449,9 +456,20 @@ class GradientAggregator:
         self.proposal_norm_ratio: float = proposal_norm_ratio
         self._pending_rows: dict[int, list[dict]] = {}  # book_id → rows
         self._pending_interval_start: dict[int, int] = {}  # book_id → interval start ts
+        # Cap on in-memory staging rows per book. Flush early when exceeded so
+        # peak RAM stays bounded regardless of order rate / book count (each row
+        # is a ~1-2 KB dict; 128 books × an unbounded 5-min window is tens of GB).
+        # 0 disables (sim-time interval flush only). Parquet filenames are
+        # content-range-based, so early flushes are transparent to the dataloader.
+        self._max_pending_rows_per_book: int = max(0, int(max_pending_rows_per_book))
         # Registry of written parquets (avoids S3 LIST for data-readiness checks)
         # book_id → [(filename, ts_start_ns, ts_end_ns), ...]
         self._written_parquets: dict[int, list[tuple[str, int, int]]] = {}
+        # Per-book flush lock: prevents concurrent _flush_book_parquet calls for
+        # the same book (cap-triggered flushes can race via two _process_tick
+        # threads, causing duplicate S3 PUTs and over-deletion from the staging
+        # buffer). Lazy-initialized via setdefault on first use.
+        self._book_flush_locks: dict[int, threading.Lock] = {}
         # Per-book engine state persists across _process_tick calls
         self._engines: dict[int, Any] = {}
         self._order_sides: dict[int, dict[int, bool]] = {}
@@ -620,11 +638,13 @@ class GradientAggregator:
         # heartbeat-loss fallback in _round_complete.
         a["_state"] = "DELIVERED"
         a["_delivered_at"] = time.time()
-        logger.debug(
-            "Assignment delivered: miner=%d round=%d books=%s data=%d files",
+        logger.info(
+            "[GTX] Assignment delivered: miner=%d round=%d books=%s ts=[%d,%d] data=%d files",
             miner_uid,
             a.get("round", 0),
             a.get("books", []),
+            int(a.get("ts_start", 0)),
+            int(a.get("ts_end", 0)),
             len(a.get("data", [])),
         )
         return {k: v for k, v in a.items() if not k.startswith("_")}
@@ -841,10 +861,12 @@ class GradientAggregator:
         Returns S3 key strings that miners can fetch from the data bucket.
         """
         keys: list[str] = []
+        _book_summaries: list[str] = []
 
         for book_id in book_ids:
             bid = int(book_id)
             parquets = self._written_parquets.get(bid, [])
+            _matched = 0
             for fname, f_start, f_end in parquets:
                 # Check overlap with [ts_start, ts_end]
                 if ts_end and f_start >= ts_end:
@@ -852,6 +874,36 @@ class GradientAggregator:
                 if ts_start and f_end <= ts_start:
                     continue
                 keys.append(f"data/{self._validator_uid}/{book_id}/intervals/{fname}")
+                _matched += 1
+            if not keys or _matched == 0:
+                if parquets:
+                    _book_summaries.append(
+                        f"book={bid} parquets={len(parquets)} "
+                        f"range=[{parquets[0][1]},{parquets[-1][2]}]"
+                    )
+                else:
+                    _book_summaries.append(f"book={bid} parquets=0")
+
+        if not keys and book_ids:
+            # Distinguish warmup ("no parquets exist yet for any assigned book"
+            # — expected for the first few rounds after a fresh start or a sim
+            # transition cleanup) from real misconfiguration ("books have
+            # parquets but none overlap the assignment ts range" — usually a
+            # validator-side ts_start sampling bug). Downgrade the warmup case
+            # so it doesn't spam at WARNING level each poll cycle for every
+            # PENDING miner during initial accumulation.
+            _any_book_has_parquets = any(
+                self._written_parquets.get(int(b)) for b in book_ids
+            )
+            _log = logger.warning if _any_book_has_parquets else logger.debug
+            _log(
+                "[GTX] _resolve_data_keys: no overlap for ts=[%d,%d] across books=%s "
+                "(per-book: %s)",
+                int(ts_start),
+                int(ts_end),
+                list(book_ids),
+                "; ".join(_book_summaries),
+            )
 
         return keys
 
@@ -1090,13 +1142,16 @@ class GradientAggregator:
             len(val_books),
         )
         ds = OrderDataset(unique_files, seq_len=256, tokenizer=tokenizer, max_cached=2)
+        # num_workers=0: in-process iteration. With num_workers>0 + persistent_workers=True,
+        # each cached loader forked 2 ~1GB worker processes that _loader_cache.clear()
+        # didn't terminate, accumulating hundreds of zombies and 10+ GB RAM over a few
+        # hours. Single-process iteration is slower per-batch but bounds RAM.
         loader = DataLoader(
             ds,
             batch_size=64,
             shuffle=False,
-            num_workers=2,
-            pin_memory=True,
-            persistent_workers=True,
+            num_workers=0,
+            pin_memory=False,
         )
         self._loader_cache[cache_key] = loader
         return loader
@@ -3060,16 +3115,28 @@ class GradientAggregator:
             files.extend(book_files)
 
         if not files:
+            _books_with_files = sum(
+                1 for b in self._written_parquets if self._written_parquets[b]
+            )
+            logger.warning(
+                "  no parquets for books=%s ts=[%d, %d] (books_with_any_flushed_data=%d/%d)",
+                list(books),
+                int(ts_start),
+                int(ts_end),
+                _books_with_files,
+                len(self._written_parquets) or 128,
+            )
             return None
 
         ds = OrderDataset(files, seq_len=256, tokenizer=tokenizer, max_cached=2)
+        # See _build_val_loader_for_ranges for the rationale on num_workers=0;
+        # same forked-worker accumulation problem applies here.
         loader = DataLoader(
             ds,
             batch_size=64,
             shuffle=False,
-            num_workers=2,
-            pin_memory=True,
-            persistent_workers=True,
+            num_workers=0,
+            pin_memory=False,
         )
         self._loader_cache[cache_key] = loader
         return loader
@@ -3179,6 +3246,7 @@ class GradientAggregator:
         self._pending_rows = {}
         self._pending_interval_start = {}
         self._written_parquets = {}
+        self._book_flush_locks = {}
         self._last_seen_sim_ts = 0
         self._reorder_buf = []
         self._reorder_seq = 0
@@ -3578,13 +3646,29 @@ class GradientAggregator:
                 if self._pending_interval_start[book_id] == 0:
                     self._pending_interval_start[book_id] = evt
 
-                # Flush when sim time crosses interval boundary
+                # Flush when sim time crosses interval boundary OR the in-memory
+                # staging buffer for this book exceeds the row cap (bounds peak
+                # RAM across all books). The cap path reuses the existing
+                # partial-flush logic in _flush_book_parquet (resets the interval
+                # start to the first leftover row), so the sim-time trigger still
+                # works from there.
                 interval_elapsed = evt - self._pending_interval_start[book_id]
-                if interval_elapsed >= self._parquet_interval_ns:
+                _cap = self._max_pending_rows_per_book
+                if (
+                    interval_elapsed >= self._parquet_interval_ns
+                    or (_cap and len(self._pending_rows[book_id]) >= _cap)
+                ):
                     self._flush_book_parquet(book_id)
 
     def _flush_book_parquet(self, book_id: int) -> None:
-        """Flush accumulated rows for a book to a parquet file on S3."""
+        """Flush accumulated rows for a book to a parquet file on S3.
+
+        Uses a per-book non-blocking lock to prevent duplicate flushes when
+        cap-triggered _process_tick calls race for the same book. If another
+        flush is already in flight, return immediately — the staging buffer
+        keeps accumulating and the next cap/interval trigger will re-flush
+        with the latest rows.
+        """
         import io as _io
 
         import numpy as np
@@ -3593,6 +3677,19 @@ class GradientAggregator:
 
         from GenTRX.src.util.schema import LOB_DEPTH, order_stream_schema
 
+        lock = self._book_flush_locks.setdefault(book_id, threading.Lock())
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            self._flush_book_parquet_locked(
+                book_id, _io, np, pa, pq, LOB_DEPTH, order_stream_schema
+            )
+        finally:
+            lock.release()
+
+    def _flush_book_parquet_locked(
+        self, book_id, _io, np, pa, pq, LOB_DEPTH, order_stream_schema
+    ):
         rows = list(self._pending_rows.get(book_id, []))
         if not rows:
             return
@@ -3603,6 +3700,19 @@ class GradientAggregator:
         tag_start = _ts_to_tag(ts_min)
         tag_end = _ts_to_tag(ts_max)
         pq_filename = f"{tag_start}-{tag_end}.parquet"
+        # _ts_to_tag is second-resolution (ddHHMMSS), so cap-triggered flushes
+        # within the same sim-second collide on (tag_start, tag_end) → identical
+        # filename → S3 PUT overwrites the prior flush. Disambiguate with a
+        # sequence suffix on the end tag; _tag_to_ns strips `_NNNN` before
+        # parsing so _filter_by_timestamp / glob behavior is unchanged.
+        _existing = self._written_parquets.get(book_id, [])
+        if any(e[0] == pq_filename for e in _existing):
+            _n = 1
+            while any(
+                e[0] == f"{tag_start}-{tag_end}_{_n:04d}.parquet" for e in _existing
+            ):
+                _n += 1
+            pq_filename = f"{tag_start}-{tag_end}_{_n:04d}.parquet"
 
         try:
             columns = {
@@ -3643,8 +3753,8 @@ class GradientAggregator:
                 filename=pq_filename,
                 data=parquet_bytes,
             )
-            logger.debug(
-                "Parquet flushed: book %d, %d rows, %s",
+            logger.info(
+                "[GTX] Parquet flushed: book %d, %d rows, %s",
                 book_id,
                 len(rows),
                 pq_filename,
@@ -4212,6 +4322,15 @@ if __name__ == "__main__":
         help="Sim time per parquet file (default: 5min = 300_000_000_000 ns, matches training window)",
     )
     parser.add_argument(
+        "--max-pending-rows-per-book",
+        type=int,
+        default=50_000,
+        help="Flush a book's in-memory staging buffer to parquet once it reaches "
+             "this many rows, in addition to the sim-time interval. Bounds peak "
+             "RAM with high book counts / order rates (each row is a ~1-2 KB dict). "
+             "0 disables the cap (sim-time interval flush only).",
+    )
+    parser.add_argument(
         "--loop-sleep-s",
         type=float,
         default=5.0,
@@ -4476,6 +4595,7 @@ if __name__ == "__main__":
         chain=chain,
         is_aggregator=args.is_aggregator,
         parquet_interval_ns=args.parquet_interval_ns,
+        max_pending_rows_per_book=args.max_pending_rows_per_book,
         loop_sleep_s=args.loop_sleep_s,
         round_grace_s=args.round_grace_s,
         max_gradient_bytes=args.max_gradient_bytes,
@@ -4515,6 +4635,7 @@ if __name__ == "__main__":
                 "val_fraction": args.val_fraction,
                 "is_aggregator": args.is_aggregator,
                 "parquet_interval_ns": args.parquet_interval_ns,
+                "max_pending_rows_per_book": args.max_pending_rows_per_book,
             },
             tags=["aggregator" if args.is_aggregator else "sibling"],
         )

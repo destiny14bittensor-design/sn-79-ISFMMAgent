@@ -158,7 +158,14 @@ class MinerTrainingService:
         self.tokenizer = None
         self.model_cfg = None
         self.tokenizer_cfg = None
-        self.device = "cpu"
+        # Set at init from torch's view of CUDA so the startup banner reflects
+        # the device that _load_model_from_checkpoint will pick. Re-checked at
+        # load time so dynamic CUDA visibility changes still work.
+        try:
+            import torch as _torch
+            self.device = "cuda" if _torch.cuda.is_available() else "cpu"
+        except Exception:
+            self.device = "cpu"
 
         # S3 stores
         self._store = None  # aggregator-bucket fallback (env-var)

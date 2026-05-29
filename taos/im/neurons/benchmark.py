@@ -97,7 +97,20 @@ if __name__ != "__mp_main__":
                 name=self.config.wallet.name,
                 hotkey=self.config.wallet.hotkey
             )
-            self.subtensor = bt.Subtensor(self.config.subtensor.chain_endpoint)
+            # When chain_endpoint is set, pass it positionally — bt.Subtensor's
+            # `network` arg accepts URLs and uses them directly. Using
+            # `config=self.config` instead lets `config.subtensor.network` (often
+            # default 'finney' or a non-matching alias) override chain_endpoint
+            # with the alias's hardcoded URL, breaking custom-endpoint deploys.
+            # GenTRX network detection has its own netuid-based fallback in
+            # agents/gentrx.py for the "subtensor.network unknown" case.
+            _chain_ep = (
+                getattr(self.config.subtensor, "chain_endpoint", None) or ""
+            )
+            if _chain_ep:
+                self.subtensor = bt.Subtensor(network=_chain_ep)
+            else:
+                self.subtensor = bt.Subtensor(config=self.config)
 
             self.metagraph = self.subtensor.metagraph(self.config.netuid)
 

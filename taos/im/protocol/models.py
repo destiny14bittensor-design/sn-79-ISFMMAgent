@@ -2293,6 +2293,14 @@ class LazyBook(Book):
         _events (list | None): Parsed events (Orders, Trades, Cancellations).
     """
     def __init__(self, raw_book):
+        # Initialize pydantic v2 internal state slots that BaseModel.__init__
+        # would normally set. Skipping super().__init__() (because Book's
+        # required fields aren't supplied here) leaves these unset, breaking
+        # any downstream access through pydantic_extra / model_dump / copy.
+        # object.__setattr__ avoids BaseModel.__setattr__'s field validation.
+        object.__setattr__(self, "__pydantic_fields_set__", set())
+        object.__setattr__(self, "__pydantic_extra__", None)
+        object.__setattr__(self, "__pydantic_private__", None)
         self._raw = raw_book
         self._bids = None
         self._asks = None

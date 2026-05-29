@@ -1,4 +1,8 @@
 #!/bin/bash
+# See run_validator.sh: set before any python launch so bittensor 10.3.2's
+# import-time logging singleton isn't built with an empty config (which silently
+# disables logging). pm2 captures it for the gradient-server process.
+export BT_NO_PARSE_CLI_ARGS=false
 # run_gradients.sh — start (or restart) the GenTRX gradient server
 #
 # All S3 credentials and the API key can be passed as flags so this script
@@ -33,7 +37,10 @@
 #   -x 0                   Skip tmux window setup
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ -f "$REPO_ROOT/.env" ] && . "$REPO_ROOT/.env"
+# set -a auto-exports every var the sourced file sets, so any child process
+# inherits them. The generated launcher (.gradient_server.sh) also uses
+# set -a; matching that here keeps pre-pm2 sanity checks consistent.
+[ -f "$REPO_ROOT/.env" ] && { set -a; . "$REPO_ROOT/.env"; set +a; }
 
 _ok()   { printf ' \033[32m✓\033[0m  %s\n' "$*"; }
 _warn() { printf ' \033[33m⚠\033[0m  %s\n' "$*"; }

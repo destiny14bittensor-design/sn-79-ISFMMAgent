@@ -25,6 +25,48 @@ def _sample_last(logits: dict, temperature: float) -> dict:
     return out
 
 
+# Field name (model head / logits key) → prompt tensor key.
+_FIELD_TO_PROMPT_KEY = {
+    "order_type": "order_types",
+    "price": "price_bins",
+    "vol_int": "vol_int_bins",
+    "vol_dec": "vol_dec_bins",
+    "interval": "interval_bins",
+}
+
+
+def score_sequence(
+    model: OrderModel,
+    tokenizer: OrderTokenizer,
+    prompt: dict[str, torch.Tensor],
+    device: str = "cpu",
+) -> dict[str, np.ndarray]:
+    """Per-field, per-step log-probability of the observed next token.
+
+    A density readout, not a generator. One forward over `prompt` (the
+    same 8-tensor dict the generators take, but length T>1 carrying real
+    observed tokens) returns `log p(token[t+1] | tokens[:t+1])` for each
+    predicted field. Low values flag orders the model found surprising.
+    Returns a dict keyed by field (order_type, price, vol_int, vol_dec,
+    interval), each a length-(T-1) array for batch row 0.
+    """
+    model.eval()
+    seqs = {k: v.to(device) for k, v in prompt.items()}
+    with torch.no_grad():
+        logits = model(
+            seqs["order_types"], seqs["price_bins"], seqs["vol_int_bins"],
+            seqs["vol_dec_bins"], seqs["interval_bins"],
+            seqs["lob_volumes"], seqs["time_of_day"], seqs["mid_deltas"],
+        )
+    out: dict[str, np.ndarray] = {}
+    for field, key in _FIELD_TO_PROMPT_KEY.items():
+        lp = F.log_softmax(logits[field][:, :-1, :], dim=-1)
+        targets = seqs[key][:, 1:].unsqueeze(-1)
+        gathered = lp.gather(-1, targets).squeeze(-1)
+        out[field] = gathered[0].detach().cpu().numpy()
+    return out
+
+
 @dataclass
 class GeneratedOrder:
     order_type: int

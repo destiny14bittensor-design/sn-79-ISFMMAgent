@@ -49,7 +49,7 @@ void LocalAgentManager::createAgentsInstanced(
         }
         else if (name == "FuturesTraderAgent") {
             createAgentInstanced<taosim::agent::FuturesTraderAgent>(child);
-        } 
+        }
         else if (name == "NoiseTraderAgent") {
             createAgentInstanced<taosim::agent::NoiseTraderAgent>(child);
         }

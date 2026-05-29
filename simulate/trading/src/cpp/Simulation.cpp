@@ -5,6 +5,7 @@
 #include "Simulation.hpp"
 
 #include <taosim/simulation/SimulationException.hpp>
+#include "GBMValuationModel.hpp"
 #include "util.hpp"
 
 #include <boost/algorithm/string/regex.hpp>
@@ -310,6 +311,20 @@ void Simulation::configureAgents(pugi::xml_node node)
     }
 
     m_signals.agentsCreated();
+}
+
+//-------------------------------------------------------------------------
+
+const std::valarray<double>& Simulation::getOrComputeGbmPath(
+    uint64_t seed, double S0, double mu, double sigma, uint32_t N)
+{
+    auto key = std::make_tuple(seed, S0, mu, sigma, N);
+    if (auto it = m_gbmPathCache.find(key); it != m_gbmPathCache.end()) {
+        return it->second;
+    }
+    GBMValuationModel<double> gbm{S0, mu, sigma, seed};
+    auto [it, _] = m_gbmPathCache.emplace(key, gbm.generatePriceSeries(1, N));
+    return it->second;
 }
 
 //-------------------------------------------------------------------------

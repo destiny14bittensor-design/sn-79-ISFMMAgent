@@ -52,26 +52,36 @@ logger = logging.getLogger(__name__)
 # Layout axes
 NETWORK_MAINNET = "mainnet"
 NETWORK_TESTNET = "testnet"
+NETWORK_LOCALNET = "localnet"
+# SN-79's canonical netuids — used as a deterministic fallback when the
+# subtensor's `network` field is "unknown" (e.g. operator passed only
+# --subtensor.chain_endpoint without --subtensor.network).
+NETUID_MAINNET = 79
+NETUID_TESTNET = 366
 MODE_SIMULATION = "simulation"
 MODE_EXCHANGE = "exchange"
 ALLOWED_MODES = (MODE_SIMULATION, MODE_EXCHANGE)
 
 
-def network_from_subtensor(name: str | None) -> str:
-    """Map a bittensor network/endpoint identifier to mainnet or testnet.
+def network_from_subtensor(name: str | None, netuid: int | None = None) -> str:
+    """Map a bittensor network/endpoint identifier to mainnet/testnet/localnet.
 
     Resolution order (highest priority first):
-      1. GENTRX_NETWORK env var — explicit operator override ("mainnet"/"testnet").
-         Required only for localnet or a private testnet node.
-      2. name == "finney" or contains "finney.opentensor.ai" (excluding
-         "test.finney") — canonical mainnet identifiers.
-      3. name == "test" / "local" / local loopback endpoint / public testnet
-         endpoint (test.finney.opentensor.ai) → testnet.
-      4. Any other wss:// or ws:// endpoint (custom / private node) → mainnet.
-         Rationale: operators running their own subtensor node are almost always
-         on mainnet; private testnet nodes are rare and those operators can set
-         GENTRX_NETWORK=testnet explicitly.
-      5. None / unrecognised → testnet (proxy test / no chain).
+      1. GENTRX_NETWORK env var — explicit operator override
+         ("mainnet" / "testnet" / "localnet"). Required only when none of the
+         signals below disambiguate (e.g. private testnet node).
+      2. name == "finney" or "finney.opentensor.ai" URL (excluding
+         "test.finney") → mainnet.
+      3. name == "test" / "local" / test.finney.opentensor.ai / local loopback
+         endpoint → testnet.
+      4. **netuid mapping** — deterministic when the operator passed only
+         --subtensor.chain_endpoint and bittensor leaves `network="unknown"`:
+            netuid 79  → mainnet
+            netuid 366 → testnet
+            anything else → localnet (private/dev chain)
+      5. Any other wss:// or ws:// endpoint with no netuid hint → mainnet
+         (operator's own node, almost always mainnet).
+      6. None / unrecognised → testnet.
     """
     import os as _os
     env = _os.environ.get("GENTRX_NETWORK", "").strip().lower()
@@ -79,38 +89,50 @@ def network_from_subtensor(name: str | None) -> str:
         return NETWORK_MAINNET
     if env in ("testnet", "test"):
         return NETWORK_TESTNET
-    if not name:
-        return NETWORK_TESTNET
-    # Explicit network names
-    if name == "finney":
-        return NETWORK_MAINNET
-    if name in ("test", "local"):
-        return NETWORK_TESTNET
-    # Known public endpoints — test.finney check must be explicit because
-    # "finney.opentensor.ai" is a substring of "test.finney.opentensor.ai"
-    if "finney.opentensor.ai" in name:
-        return NETWORK_TESTNET if "test.finney" in name else NETWORK_MAINNET
-    # Local loopback — always testnet (localnet)
-    if name.startswith(("ws://127.", "ws://localhost", "wss://127.", "wss://localhost")):
-        return NETWORK_TESTNET
-    # Any other explicit wss:// / ws:// endpoint → operator's own node → mainnet
-    if name.startswith(("wss://", "ws://")):
+    if env in ("localnet", "local"):
+        return NETWORK_LOCALNET
+    # Explicit network names take precedence over netuid (operator was explicit).
+    if name:
+        if name == "finney":
+            return NETWORK_MAINNET
+        if name in ("test", "local"):
+            return NETWORK_TESTNET
+        # Known public endpoints — test.finney check must be explicit because
+        # "finney.opentensor.ai" is a substring of "test.finney.opentensor.ai"
+        if "finney.opentensor.ai" in name:
+            return NETWORK_TESTNET if "test.finney" in name else NETWORK_MAINNET
+        # Local loopback — always testnet (localnet)
+        if name.startswith(("ws://127.", "ws://localhost", "wss://127.", "wss://localhost")):
+            return NETWORK_TESTNET
+    # Netuid-based fallback for ambiguous / "unknown" network names. Triggered
+    # when the operator passed only --subtensor.chain_endpoint <custom-url>.
+    if netuid is not None:
+        if netuid == NETUID_MAINNET:
+            return NETWORK_MAINNET
+        if netuid == NETUID_TESTNET:
+            return NETWORK_TESTNET
+        return NETWORK_LOCALNET
+    # Any other explicit wss:// / ws:// endpoint with no netuid hint → mainnet
+    if name and name.startswith(("wss://", "ws://")):
         return NETWORK_MAINNET
     return NETWORK_TESTNET
 
 
-def network_from_config(subtensor_config: Any) -> str:
+def network_from_config(subtensor_config: Any, netuid: int | None = None) -> str:
     """Resolve the bucket-prefix network from a bittensor subtensor config.
 
     A local chain_endpoint overrides the `network` field; otherwise the
-    `network` field decides via network_from_subtensor.
+    `network` field decides via network_from_subtensor, with the optional
+    `netuid` arg supplying a deterministic fallback for "unknown" networks.
     """
     if subtensor_config is None:
-        return NETWORK_TESTNET
+        return network_from_subtensor(None, netuid=netuid)
     chain_endpoint = getattr(subtensor_config, "chain_endpoint", "") or ""
     if any(m in chain_endpoint for m in ("localhost", "127.0.0.1", "::1")):
         return NETWORK_TESTNET
-    return network_from_subtensor(getattr(subtensor_config, "network", None))
+    return network_from_subtensor(
+        getattr(subtensor_config, "network", None), netuid=netuid
+    )
 
 
 def gentrx_prefix(network: str, mode: str) -> str:

@@ -96,7 +96,20 @@ class BaseNeuron(ABC):
                     name=self.config.wallet.name,
                     hotkey=self.config.wallet.hotkey
                 )
-            self.subtensor = bt.Subtensor(self.config.subtensor.chain_endpoint)
+            # Pass chain_endpoint positionally (it's the `network` arg of
+            # bt.Subtensor.__init__, which accepts URLs directly) when set.
+            # Using `bt.Subtensor(config=self.config)` instead causes bittensor
+            # 10.3.x to resolve via `config.subtensor.network` first — when
+            # that's a known alias (default 'finney' or anything in the alias
+            # table like 'local'), it overrides chain_endpoint with the alias's
+            # hardcoded URL and yields ConnectionError on the wrong host.
+            _chain_ep = (
+                getattr(self.config.subtensor, "chain_endpoint", None) or ""
+            )
+            if _chain_ep:
+                self.subtensor = bt.Subtensor(network=_chain_ep)
+            else:
+                self.subtensor = bt.Subtensor(config=self.config)
             self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
         # bt 10.3.x's substrate websocket is not thread-safe — concurrent

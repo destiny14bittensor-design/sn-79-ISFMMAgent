@@ -21,6 +21,9 @@
 #include <fmt/core.h>
 
 #include <barrier>
+#include <map>
+#include <tuple>
+#include <valarray>
 
 //-------------------------------------------------------------------------
 
@@ -165,6 +168,13 @@ public:
     void setError(bool flag) noexcept { m_error = flag; }
     [[nodiscard]] bool error() const noexcept { return m_error; }
 
+    // GBM trajectory cache shared across agents that sample the same path at
+    // configure-time (e.g. all StylizedTraderAgent instances within a block use
+    // identical S0/mu/sigma/N and a seed derived only from bookId).  Single
+    // threaded by design — configure() runs serially per block.
+    const std::valarray<double>& getOrComputeGbmPath(
+        uint64_t seed, double S0, double mu, double sigma, uint32_t N);
+
     void step();
 
     [[nodiscard]] static std::unique_ptr<Simulation> fromXML(pugi::xml_node node);
@@ -205,6 +215,10 @@ private:
     taosim::replay::ReplayDesc m_replayDesc;
     const taosim::simulation::SharedResources* m_sharedResources{};
     std::unordered_map<Timestamp, taosim::decimal_t> m_timestampToMidPrice;
+    // (seed, S0, mu, sigma, N) -> generated GBM trajectory.  std::map so
+    // references into stored valarrays remain valid as entries are inserted.
+    std::map<std::tuple<uint64_t, double, double, double, uint32_t>,
+             std::valarray<double>> m_gbmPathCache;
 
     friend class LocalAgentManager;
     friend class MultiBookExchangeAgent;

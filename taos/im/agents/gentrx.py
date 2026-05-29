@@ -299,7 +299,18 @@ class GenTRXAgent(FinanceSimulationAgent):
         if _network_override:
             import os as _os
             _os.environ["GENTRX_NETWORK"] = _network_override
-        _network = network_from_config(getattr(self.config, "subtensor", None))
+        # Pass netuid so network_from_config falls back to the deterministic
+        # mapping (79 → mainnet, 366 → testnet, else → localnet) when
+        # subtensor.network is "unknown" — happens when operator passes only
+        # --subtensor.chain_endpoint without --subtensor.network.
+        _netuid = getattr(self.config, "netuid", None)
+        try:
+            _netuid = int(_netuid) if _netuid is not None else None
+        except (TypeError, ValueError):
+            _netuid = None
+        _network = network_from_config(
+            getattr(self.config, "subtensor", None), netuid=_netuid
+        )
         g.bucket_prefix = gentrx_prefix(_network, _mode)
         gtx_log.info(
             f"GenTRX bucket prefix: {g.bucket_prefix} "

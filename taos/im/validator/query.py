@@ -7,6 +7,7 @@ Standalone query service using POSIX IPC for communication.
 import time
 import asyncio
 import bittensor as bt
+import bittensor.utils.networking as _bt_net
 import posix_ipc
 import mmap
 import struct
@@ -20,7 +21,6 @@ from collections import defaultdict
 from taos.im.protocol import STP
 from taos.im.protocol import MarketSimulationStateUpdate
 from taos.im.validator.forward import DendriteManager
-from taos.common.config import _backfill_nested_namespaces
 
 class QueryService:
     def __init__(self, config):
@@ -47,6 +47,10 @@ class QueryService:
             hotkey=self.config.wallet.hotkey
         )
         self.dendrite = bt.Dendrite(wallet=self.wallet)
+        # Cache the external IP so subsequent bt.Dendrite() calls in query_miners
+        # don't make synchronous HTTP requests to AWS/ipinfo/ifconfig.me.
+        _cached_ip = self.dendrite.external_ip
+        _bt_net.get_external_ip = lambda: _cached_ip
         self.running = True
         self.request_queue = None
         self.response_queue = None
@@ -923,7 +927,7 @@ if __name__ == '__main__':
     parser.add_argument('--notify-fd', type=int, default=None)
     
 
-    config = _backfill_nested_namespaces(bt.Config(parser), parser)
+    config = bt.Config(parser)
     bt.logging(config=config)
 
     if config.cpu_cores:

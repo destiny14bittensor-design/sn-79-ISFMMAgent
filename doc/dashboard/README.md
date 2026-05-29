@@ -5,6 +5,7 @@ This document serves to provide details on the data displayed at the [τaos dash
 
 - [Validator Page](#validator-page)
   - [Validator Info](#validator-info)
+  - [Scoring Config](#scoring-config)
   - [Simulation Config](#simulation-config)
   - [Fee Policy](#fee-policy)
     - [Fee Parameters](#fee-parameters)
@@ -29,17 +30,24 @@ This document serves to provide details on the data displayed at the [τaos dash
   - [Dynamic Fee Rates Plot](#dynamic-fee-rates-plot)
 - [Agent Page](#agent-page)
   - [Agent Info](#agent-info)
+  - [Trades Table](#trades-table-2)
   - [Score Plot](#score-plot)
   - [Performance Plot](#performance-plot)
-  - [Trades Table](#trades-table-2)
   - [Requests Plot](#requests-plot)
+  - [GenTRX Plots](#gentrx-plots)
   - [Daily Volume Plot](#daily-volume-plot)
   - [Round-Trip Volume Plot](#round-trip-volume-plot)
   - [Realized PnL Plot](#realized-pnl-plot)
-  - [Kappa-3 Plots](#kappa-3-plots)
+  - [Kappa3 Plots](#kappa3-plots)
   - [Unrealized Profit \& Loss Plots](#unrealized-profit--loss-plots)
-  - [Fee Rates Plot](#fee-rates-plot)
+  - [Last Fee Rate](#last-fee-rate)
   - [Balances Plots](#balances-plots)
+- [GenTRX Page](#gentrx-page)
+  - [Status](#status)
+  - [Miners](#miners)
+  - [Training Progress](#training-progress)
+  - [Per-Miner Performance](#per-miner-performance)
+  - [Diagnostics](#diagnostics)
 
 
 ## Validator Page
@@ -56,10 +64,39 @@ The second row contains metagraph data for the validator - stake, vTrust, last u
 
 The third row displays the current resource usage of the validator hosting instance.
 
-### Simulation Config
-![alt text](validator_config.png)
+### Scoring Config
 
-The next section displays the most central simulation config parameters.
+![alt text](validator_scoring_config.png)
+
+The first config table displays the parameters that govern how miners are scored.  See the [scoring documentation](https://simulate.trading/taos-im-scoring-paper) for full detail on the underlying formulas.
+
+- **Max 24H Vol** - Cap on rolling 24-hour traded volume used by activity calculation; volumes above this don't earn additional activity.
+
+- **Max Instructions / Book** - Maximum number of order instructions an agent may submit per book per scoring step; submissions above the cap are rejected.
+
+- **GenTRX Share** - Fraction of overall scoring weight allocated to GenTRX (the training side of incentive).  The remainder is the trading-side weight.  Same value surfaced as **Pool Share** on the [GenTRX Page](#gentrx-page).
+
+- **PnL Score Weight** - Relative weight of the PnL Score component inside the trading-side Trading Score.
+
+- **Kappa3 Weight** - Relative weight of the Kappa3 Score component inside the trading-side Trading Score.  PnL Score Weight + Kappa3 Weight = 1 on the trading side.
+
+- **Kappa3 Assessment Window** - Length of the rolling window (in simulation time) over which Kappa3 is computed.
+
+- **Min PnL Observations** - Minimum number of realized PnL observations required for an agent to be eligible for a PnL Score; under this count the agent's PnL Score is suppressed.
+
+- **Activity Impact** - Strength with which the activity factor scales the Kappa3 Score (higher = more reward concentrated on high-volume traders).
+
+- **Activity Decay Rate** - Exponential decay applied to the activity factor when an agent's rolling round-trip volume falls below the target; controls how quickly inactivity is penalised.
+
+- **Scoring Interval** - How often (in simulation time) the validator runs a full scoring + weight-update cycle.
+
+### Simulation Config
+
+![alt text](validator_simulation_config.png)
+
+The second config table covers the simulation setup.
+
+- **ID** - Unique identifier for the current simulation run (e.g. `20260523_1644`).
 
 - **Books** - Number of order books in the simulation.
 
@@ -84,8 +121,6 @@ The next section displays the most central simulation config parameters.
 - **Capital Type** - Distribution method for initial capital allocation.
 
 - **Miner Wealth** - Initial total value of assets allocated to each miner agent.
-
-- **Max Orders** - Maximum number of concurrently open orders per agent on each book.
 
 - **Init Agents** - Number of initialization agents present in the simulation.
 
@@ -188,35 +223,39 @@ The Books table displays the current state of the top 5 levels of each orderbook
 
 The Agents table provides summary performance information for all miners in the subnet.  Values are all aggregated over all books.
 
-- **Pos** - Ranking position of the agent based on score.
+- **Pos** - Ranking position of the agent based on final score.  Sorted ascending by default.
 
-- **Agent** - Unique identifier for the agent (equal to miner UID).  Note that clicking on the agent ID here will redirect to the Agent details page for that UID.
+- **Agent** - Unique identifier for the agent (equal to miner UID).  Clicking on the agent ID redirects to the Agent details page for that UID.
 
-- **24H Vol [QUOTE]** - The agent's total trading volume in QUOTE asset over the last 24 simulation hours for whichever book they traded in the least.
+- **24H Vol** - The agent's total trading volume in QUOTE asset over the last 24 simulation hours for whichever book they traded in the least.
 
-- **24H RT [QUOTE]** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for whichever book they traded in the least.
+- **24H RT (QUOTE)** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for whichever book they traded in the least.
 
 - **Activity** - Activity score based on round-tripped trading volume executed in the latest assessment window.
 
 - **Realized PnL** - Realized Profit and Loss from closed positions over the latest assessment window in QUOTE asset.
 
-- **Median Kappa** - Median of Kappa-3 ratio values over all books.
+- **Median Kappa3** - Median of Kappa3 ratio values over all books.
 
-- **Penalty** - Penalty factor applied to the agent's score due to inconsistent realized Sharpe performance in one or more books.
+- **Penalty** - Outlier penalty factor applied to the agent's Kappa3 Score due to inconsistent realized performance in one or more books.
 
-- **Kappa Score** - Final Kappa-based score calculated using activity-weighted median normalized realized Kappa-3 ratio with outlier penalty for latest assessment period.
+- **Kappa3 Score** - Activity-weighted median normalized realized Kappa3 ratio with outlier penalty applied, for the latest assessment window.
 
-- **Score** - Final composite score determining agent ranking; obtained as an exponential moving average of the Sharpe score over a period of observations.
+- **Trading Score** - Combined trading-side score blending the Kappa3 Score with the PnL Score for the latest assessment window.  This is the trading half of incentive; the GenTRX half is below.
 
-- **ΔInv [QUOTE]** - Total change in miner inventory value since the start of simulation.
+- **GenTRX Score** - The miner's EMA-smoothed GenTRX training reward, mirrored from the [GenTRX Page](#gentrx-page).  The final Score blends this with the Trading Score by the configured GenTRX Pool Share.
 
-- **BASE Balance** - Current balance of BASE held by the agent.
+- **Score** - Final composite score determining agent ranking; an exponential moving average of the blended trading and GenTRX components.
+
+- **ΔInv (QUOTE)** - Total change in miner inventory value since the start of simulation.
+
+- **Base Balance** - Current balance of BASE held by the agent.
 
 - **BASE Loan** - Quantity of BASE borrowed by the agent via leveraged orders.
 
 - **BASE Collat.** - Collateral posted in BASE for borrowing.
 
-- **QUOTE Balance** - Current balance of QUOTE held by the agent.
+- **Quote Balance** - Current balance of QUOTE held by the agent.
 
 - **QUOTE Loan** - Quantity of QUOTE borrowed by the agent via leveraged orders.
 
@@ -295,23 +334,23 @@ The Agents table at the Book page displays statistics for agents calculated spec
 
 - **Agent** - Unique identifier for the agent.
 
-- **24H Vol** - Agent's total trading volume in QUOTE asset over the last 24 simulation hours on the selected book.
+- **24H Vol (QUOTE)** - Agent's total trading volume in QUOTE asset over the last 24 simulation hours on the selected book.
 
 - **24H Vol (Maker)** - Agent's maker trading volume (liquidity-providing trades) in QUOTE asset over the last 24 simulation hours on the selected book.
 
 - **24H Vol (Taker)** - Agent's taker trading volume (liquidity-taking trades) in QUOTE asset over the last 24 simulation hours on the selected book.
 
-- **24H RT [QUOTE]** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for the selected book.
+- **24H RT (QUOTE)** - The agent's total round-tripped volume in QUOTE asset over the last 24 simulation hours for the selected book.
 
-- **Activity** - Activity factor indicating agent's trading engagement level as a function of round-tripped volume.  This is multiplied onto the Kappa-3 score for each book to reward miners who achieve high risk-adjusted performance while also trading significant volume.
+- **Activity** - Activity factor indicating agent's trading engagement level as a function of round-tripped volume.  This is multiplied onto the Kappa3 score for each book to reward miners who achieve high risk-adjusted performance while also trading significant volume.
 
 - **Realized PnL** - Realized Profit and Loss from closed positions over the latest assessment window in QUOTE asset for the selected book.
 
-- **Kappa** - Kappa-3 ratio for the selected book.
+- **Kappa3** - Kappa3 ratio for the selected book.
 
-- **Kappa Score** - Kappa3-based score calculated as activity-weighted and normalized Kappa-3 ratio for latest assessment period on the selected book.
+- **Kappa3 Score** - Kappa3-based score calculated as activity-weighted and normalized Kappa3 ratio for latest assessment period on the selected book.
 
-- **ΔInv [QUOTE]** - Total change in miner inventory value since the start of simulation or registration of the UID (whichever is more recent).
+- **ΔInv (QUOTE)** - Total change in miner inventory value since the start of simulation or registration of the UID (whichever is more recent).
 
 - **Maker Fee** - Current maker fee rate at the time of observation for the agent on the selected book.
 
@@ -355,23 +394,11 @@ The unique identifier for the agent and the current simulation time are presente
 
 The second row shows the key metagraph statistics for the agent - consensus, emission, incentive and trust.
 
-### Score Plot
-
-![alt text](agent_score.png)
-
-The topmost left plot displays the total score for the agent as assigned by the selected validator(s) on the right y-axis, and the incentive of the agent on the left y-axis.
-
-### Performance Plot
-
-![alt text](agent_performance.png)
-
-The Performance plot illustrates the ranking in terms of score of the agent over time as assigned by the selected validator(s), as well as an average ranking taken over all selected validators.  The ranking indicates where among the subnet miners this agent places; higher ranking indicates outperformance of others.
-
 ### Trades Table
 
 ![alt text](agent_trades.png)
 
-The Trades table shows details of the latest 5 trades on each book for the select agent:
+The Trades table sits to the right of the agent info at the top of the page and shows details of the latest 5 trades on each book for the selected agent:
 
 - **Time** - Simulation timestamp of when the trade was executed.
 
@@ -385,9 +412,21 @@ The Trades table shows details of the latest 5 trades on each book for the selec
 
 - **Role** - The role of the selected agent in the trade, either maker (providing liquidity with passive order) or taker (taking liquidity with aggressive order).
 
-- **Fee [QUOTE]** - Fee charged to or rebate earned in the trade by the selected agent.
+- **Fee (QUOTE)** - Fee charged to or rebate earned in the trade by the selected agent.
 
 - **Validator** - Hotkey of the validator in whose simulation the trade took place.
+
+### Score Plot
+
+![alt text](agent_score.png)
+
+The topmost left plot displays the total score for the agent as assigned by the selected validator(s) on the right y-axis, and the incentive of the agent on the left y-axis.
+
+### Performance Plot
+
+![alt text](agent_performance.png)
+
+The Performance plot illustrates the ranking in terms of score of the agent over time as assigned by the selected validator(s), as well as an average ranking taken over all selected validators.  The ranking indicates where among the subnet miners this agent places; higher ranking indicates outperformance of others.
 
 ### Requests Plot
 
@@ -400,6 +439,16 @@ This plot illustrates statistics related to communication with validators; the l
 - **Failures** - Responses which failed to be received by the validator due to reasons other than timeout (e.g. network configuration issue).
 - **Timeouts** - Responses not received by the validator due to exceeding the response timeout.
 - **Rejections** - Responses not sent to validator due to blacklisting rules.
+
+### GenTRX Plots
+
+![alt text](agent_gentrx.png)
+
+The Agent page also surfaces the selected miner's per-round GenTRX outcomes alongside the trading metrics.  The dedicated [GenTRX Page](#gentrx-page) covers the network-wide training state.
+
+- **GenTRX Generalization - Own vs Held-Out** - For the selected agent, per-round own-data score and held-out validation score.  `score_own` is the gradient's improvement on the miner's own training data; `score_held` is its improvement on a held-out shard the miner never sees.  A persistent gap (own ≫ held) means the gradient is over-fitting; the `overfitting` series flags rounds where the validator detected this.
+
+- **GenTRX Gradient Health & Outcomes** - For the selected agent, per-round gradient outcomes.  `accepted` flags rounds whose gradient cleared the score threshold and was applied this round; `rollback` flags rounds where this gradient was selected during a rollback; `grad_norm` is the L2 norm of the submitted gradient — useful for spotting collapsing or exploding gradients.
 
 ### Daily Volume Plot
 
@@ -419,12 +468,12 @@ This plot illustrates the average volumes over all selected validators which wer
 
 This plot illustrates the realized PnL achieved by the agent in the most recent Sharpe assessment window over time.  Realized PnL is calculated from round tripped trades, using the price difference and fees/rebates to calculate the profit or loss realized through trading activity.
 
-### Kappa-3 Plots
+### Kappa3 Plots
 
 ![alt text](agent_kappa.png)
 
-The Kappa-3 plot displays the raw (unnormalized and unweighted) Kappa-3 ratio achieved by the agent on all books, as well as the median value.
-The Kappa-3 Score plot displays the normalized and weighted Kappa-3 Score calculated for the agent for each book, as well as the median value.  The outlier penalty applied to the score is also plotted.
+The Kappa3 plot displays the raw (unnormalized and unweighted) Kappa3 ratio achieved by the agent on all books, as well as the median value.
+The Kappa3 Score plot displays the normalized and weighted Kappa3 Score calculated for the agent for each book, as well as the median value.  The outlier penalty applied to the score is also plotted.
 
 ### Unrealized Profit & Loss Plots
 
@@ -433,14 +482,97 @@ The Kappa-3 Score plot displays the normalized and weighted Kappa-3 Score calcul
 The Total Inventory Value Change plot illustrates the unrealized PnL (change in total inventory value) achieved by the agent since start of simulation or registration, for each book as well as in total.
 The Unrealized PnL plot ilustrates the profit and loss (change in inventory value) achieved by the agent over the preceding Sharpe assessment window, for each book individually and in total.
 
-### Fee Rates Plot
+### Last Fee Rate
 
 ![alt text](agent_fees.png)
 
-This plot displays a history of the fee rates paid by the agent in trades, for each book and on average.  The average and per-book MTR is also plotted.
+This plot displays a history of the fee rates paid by the agent in their most recent trade on each book and on average across books.  The average and per-book MTR is also plotted.
 
 ### Balances Plots
 
 ![alt text](agent_balances.png)
 
 The BASE and QUOTE balances and loans for the agent are plotted for each book as well as in total over all books.
+
+
+## GenTRX Page
+
+This page surfaces the state and health of the GenTRX distributed-training workload — the model-training side of incentive that runs alongside trading-simulation scoring.  Each round, validators score gradients submitted by miners, aggregate those that improve the held-out loss, and roll back if a round regresses.
+
+### Status
+
+![alt text](gentrx_status.png)
+
+The top of the page summarises the current state of the training run.  The first row reports validator-side configuration and round counters; the second row tracks per-round miner participation through the pipeline.
+
+- **GenTRX Status** - Whether GenTRX training is active.  Red = inactive; submitted gradients will not be scored.
+
+- **Pool Share** - Fraction of validator scoring weight allocated to GenTRX.  Higher = a larger share of incentive comes from training.
+
+- **Checkpoint Version** - Current model checkpoint version. Increments when a round is accepted.  Train against this version to avoid version-mismatch rejections.
+
+- **Aggregation Round** - Current round number.  One round is one scoring + aggregation cycle.
+
+### Miners
+
+- **Active Miners** - Miners currently assigned a GenTRX gradient slot.
+
+- **Delivered** - Fraction of assigned miners that fetched their assignment from the validator (`GET /gentrx/assignment`).  Low values point at miners not polling for work — this is the validator → miner direction, not the gradient submission.
+
+- **Scored** - Fraction of assigned miners whose gradient reached the validator, parsed cleanly, and completed scoring without error.  Drops here mean upload, parse, or scoring failures — check gradient format and round version.
+
+- **Accepted** - Fraction of assigned miners whose gradient cleared the score threshold and was applied to the model (`n_accepted / n_assigned`).  This is the end-to-end yield of the round; only this group earns reward this round.
+
+### Training Progress
+
+![alt text](gentrx_training.png)
+
+Two timeseries plots tracking model improvement and rollbacks across rounds.
+
+- **Model Loss — Before & After Aggregation** - Held-out loss before (orange) and after (green) each round's accepted gradients.  The gap is per-round improvement.  When the lines converge, training is plateauing and higher-quality gradients are needed.
+
+- **Loss Improvement per Round** - Per-round change in held-out loss.  Green bars = the round helped, red = rollback.
+
+### Per-Miner Performance
+
+![alt text](gentrx_miners.png)
+
+Per-miner scoring detail.  Series-line panels show the top 10 by current value; use the **Agent / UID** selector at the top of the page to focus on a specific miner.
+
+- **Per-Miner GenTRX EMA Score** - EMA-smoothed GenTRX reward per miner.  This is the value the validator sets on-chain.  Range 0–1 after rank normalisation.
+
+- **Agent Standings** - Per-agent table summarising GenTRX participation and reward over the current dashboard time window.
+  - **Accepted** - Count of accepted rounds in the window.
+  - **GenTRX** - EMA-smoothed GenTRX training score.
+
+- **Combined Score (held-out ± overfitting penalty)** - Per-round combined score per miner.  Built from held-out loss improvement with a penalty applied when the gradient over-fit to the miner's own data.  This is what feeds the EMA reward.
+
+- **Own-Data Score** - Per-round score on each miner's own training data.  Positive = the gradient improved the model on data the miner has seen.  Negative = the gradient did not even fit its own data.
+
+- **Held-Out Validation Score** - Per-round score on a held-out shard the miner never sees.  The generalisation signal.  If held is much lower than own-data, the miner is over-fitting.
+
+### Diagnostics
+
+![alt text](gentrx_diagnostics.png)
+
+Lower-level diagnostics for troubleshooting training health and validator-side latency.
+
+- **Per-field loss** - Cross-entropy loss per output field: order type, price, quantity (`vol_int`, `vol_dec`), time interval.  Persistently flat-high fields are underfit; gradients that move those fields are more valuable.
+
+- **Participation funnel per round** - Round attrition through the pipeline.  `assigned` = chosen at round start; `delivered` = fetched their assignment; `collected` = gradient received and parsed by the validator; `scored` = scoring ran without error.
+
+- **Acceptance Rate Over Time** - Acceptance rate (`n_accepted / n_scored`) over time.  Red zone (<30%): few of the gradients that reached scoring are clearing the threshold.  Green (>60%): healthy throughput.
+
+- **Rollback rate (rolling 10/50 rounds)** - Rolling rollback rate over the last 10 and 50 rounds.  Persistent high values mean recent accepted gradients are not actually helping; reward density is lower in this regime.
+
+- **Gradient-norm distribution across miners** - Distribution of miners' gradient L2 norms each round (min / median / mean / max / std).  Outliers in min or max often correlate with rejected gradients; aim for the median.
+
+- **Aggregation Duration Breakdown** - Per-round validator latency: scoring (blue), aggregation + validation (purple), total (orange).  All in seconds.  Affects how quickly the next round opens.
+
+- **Aggregation timing breakdown (stacked seconds)** - Stacked breakdown of where each round's time is spent on the validator (scoring, proposal eval, checkpoint save, loader build).  Does not affect scoring directly.
+
+- **Top-k index overlap (collusion detector)** - Pairwise overlap between miners' top-k gradient indices.  High mean overlap can flag coordinated or copied gradients across miners.
+
+- **Loader-cache hit rate** - Validator-side hit rate for the held-out data loader cache.  Affects round latency only; does not change scoring.
+
+- **Model-version mismatches per round** - Submitted gradients each round that targeted a stale checkpoint version and were therefore discarded.  If non-zero, ensure you pull the latest checkpoint before each training round.

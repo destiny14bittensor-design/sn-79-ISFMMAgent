@@ -24,47 +24,9 @@ os.environ.setdefault("BT_NO_PARSE_CLI_ARGS", "false")
 
 import argparse
 import bittensor as bt
-from bittensor.core.config import DefaultMunch
 from loguru import logger
 
 from taos.common.utils.prometheus import prometheus
-
-
-def _backfill_nested_namespaces(config: "bt.Config", parser: argparse.ArgumentParser, args=None) -> "bt.Config":
-    """Reconstruct nested namespaces for dotted argparse args that bittensor's
-    Config left flat or null.
-
-    bittensor < 10.3.2 auto-nests dotted CLI args (``--neuron.name`` ->
-    ``config.neuron.name``). 10.3.2 stopped doing this for caller-defined
-    dotted args, leaving ``config.neuron`` as ``None`` and crashing
-    ``check_config`` below at ``config.neuron.name``. This helper restores
-    the pre-10.3.2 shape without depending on the SDK.
-
-    Only backfills sub-namespaces that are currently missing/None; namespaces
-    already populated by bittensor (``wallet``, ``subtensor``, ``axon``,
-    ``logging``) keep their post-processed values (``~``-expanded paths etc.).
-    Uses plain ``DefaultMunch`` for new namespaces so they don't inherit
-    ``bt.Config``'s default flag noise (``config``/``strict``/``axon``/...).
-    """
-    parsed = vars(parser.parse_known_args(args)[0])
-    top_namespaces = {k.split(".", 1)[0] for k in parsed if "." in k}
-    for ns_name in top_namespaces:
-        existing = config.get(ns_name)
-        if isinstance(existing, dict) and existing:
-            continue
-        config[ns_name] = DefaultMunch(None)
-        for k, v in parsed.items():
-            if not k.startswith(ns_name + "."):
-                continue
-            parts = k[len(ns_name) + 1:].split(".")
-            d = config[ns_name]
-            for part in parts[:-1]:
-                cur = d.get(part)
-                if not isinstance(cur, dict):
-                    d[part] = DefaultMunch(None)
-                d = d[part]
-            d[parts[-1]] = v
-    return config
 
 
 class ParseKwargs(argparse.Action):
@@ -287,4 +249,4 @@ def config(cls):
     bt.Axon.add_args(parser)
     prometheus.add_args( parser )
     cls.add_args(parser)
-    return _backfill_nested_namespaces(bt.Config(parser), parser)
+    return bt.Config(parser)

@@ -26,7 +26,6 @@ from taos.im.protocol.models import TradeInfo, MarketSimulationConfig
 from taos.im.protocol.events import TradeEvent
 
 from taos.common.utils.prometheus import prometheus
-from taos.common.config import _backfill_nested_namespaces
 from taos.im.utils import duration_from_timestamp
 from prometheus_client import Counter, Gauge, Info, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST
 from fastapi import FastAPI
@@ -180,15 +179,16 @@ class ReportingService:
         self.prometheus_miner_gauges = Gauge('miner_gauges', 'Gauge summaries for miner-related metrics.', ['wallet', 'netuid', 'sim_id', 'agent_id', 'miner_gauge_name'], registry=self.registry_miner)
         self.prometheus_book_gauges = Gauge('book_gauges', 'Gauge summaries for book-related metrics.', ['wallet', 'netuid', 'sim_id', 'book_id', 'level', 'book_gauge_name'], registry=self.registry_books)
         self.prometheus_agent_gauges = Gauge('agent_gauges', 'Gauge summaries for agent-related metrics.', ['wallet', 'netuid', 'sim_id', 'book_id', 'agent_id', 'agent_gauge_name'], registry=self.registry_agent)
-        self.prometheus_trades = Gauge('trades', 'Gauge summaries for trade metrics.', [
-            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id', 'agent_id', 'trade_id',
-            'aggressing_order_id', 'aggressing_agent_id', 'resting_order_id', 'resting_agent_id',
-            'maker_fee', 'taker_fee',
-            'price', 'volume', 'side', 'trade_gauge_name'], registry=self.registry_trades)
-        self.prometheus_miner_trades = Gauge('miner_trades', 'Gauge summaries for agent trade metrics.', [
-            'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id', 'uid',
-            'role', 'price', 'volume', 'side', 'fee',
-            'miner_trade_gauge_name'], registry=self.registry_trades)
+        # Bounded-slot shape: per-trade numeric fields live in the metric VALUE keyed
+        # by `trade_gauge_name`, indexed by a fixed `slot` (rolling-buffer position).
+        # This caps cardinality at books x buffer_len x fields instead of minting a
+        # new series per trade (price/fee/volume/timestamp/id were previously labels).
+        self.prometheus_trades = Gauge('trades', 'Gauge summaries for trade metrics.',
+            ['wallet', 'netuid', 'sim_id', 'book_id', 'slot', 'trade_gauge_name'],
+            registry=self.registry_trades)
+        self.prometheus_miner_trades = Gauge('miner_trades', 'Gauge summaries for agent trade metrics.',
+            ['wallet', 'netuid', 'sim_id', 'book_id', 'uid', 'slot', 'miner_trade_gauge_name'],
+            registry=self.registry_trades)
         self.prometheus_books = Gauge('books', 'Gauge summaries for book snapshot metrics.', [
             'wallet', 'netuid', 'sim_id', 'timestamp', 'timestamp_str', 'book_id',
             'bid_5', 'bid_vol_5', 'bid_4', 'bid_vol_4', 'bid_3', 'bid_vol_3', 'bid_2', 'bid_vol_2', 'bid_1', 'bid_vol_1',
@@ -203,7 +203,7 @@ class ReportingService:
             'total_roundtrip_volume', 'min_roundtrip_volume', 'average_roundtrip_volume',
             'activity_factor', 'pnl_factor',
             'kappa', 'kappa_penalty', 'kappa_score',
-            'pnl_score', 'combined_score',
+            'pnl_score', 'combined_score', 'gentrx_score',
             'unnormalized_score', 'score',
             'miner_gauge_name'
         ], registry=self.registry_miner)
@@ -1043,11 +1043,26 @@ async def report(self: ReportingService) -> None:
             bt.logging.debug(f"Collecting trade metrics...")
             start = time.time()
             for bookId, trades in self.recent_trades.items():
-                for trade in trades:
-                    updates.append((self.prometheus_trades, 1.0,
-                        wallet_addr, netuid, simid, trade.timestamp, duration_from_timestamp(trade.timestamp),
-                        bookId, trade.taker_agent_id, trade.id, trade.taker_id, trade.taker_agent_id, trade.maker_id, trade.maker_agent_id,
-                        trade.maker_fee, trade.taker_fee, trade.price, trade.quantity, trade.side, "trades"))
+                # slot=0 is the most recent trade; values that were labels become
+                # the gauge value keyed by trade_gauge_name. timestamp is emitted in
+                # seconds (ns/1e9) to stay float64 integer-exact; the Grafana table
+                # formats it (the human-readable timestamp_str label is dropped).
+                for slot, trade in enumerate(reversed(trades)):
+                    for name, val in (
+                        ("timestamp", trade.timestamp / 1e9),
+                        ("price", trade.price),
+                        ("volume", trade.quantity),
+                        ("maker_fee", trade.maker_fee),
+                        ("taker_fee", trade.taker_fee),
+                        ("side", trade.side),
+                        ("taker_agent_id", trade.taker_agent_id),
+                        ("maker_agent_id", trade.maker_agent_id),
+                        ("aggressing_order_id", trade.taker_id),
+                        ("resting_order_id", trade.maker_id),
+                        ("trade_id", trade.id),
+                    ):
+                        updates.append((self.prometheus_trades, val,
+                            wallet_addr, netuid, simid, bookId, slot, name))
 
             bt.logging.debug(f"Trade metrics collected ({time.time()-start:.4f}s).")
 
@@ -1083,6 +1098,7 @@ async def report(self: ReportingService) -> None:
             'kappa_values': self.kappa_values,
             'unnormalized_scores': self.unnormalized_scores,
             'scores': self.scores,
+            'gentrx_scores': self.gentrx_scores,
             'book_count': self.simulation.book_count,
             'simulation_config': {
                 'volumeDecimals': self.simulation.volumeDecimals,
@@ -1225,16 +1241,22 @@ async def report(self: ReportingService) -> None:
                     if len(miner_trades) > 0:
                         last_maker_trade = None
                         last_taker_trade = None
-                        for miner_trade, role in self.recent_miner_trades[uid][bookId]:
-                            updates.append((self.prometheus_miner_trades, 1.0,
-                                wallet_addr, netuid, simid,
-                                miner_trade.timestamp, duration_from_timestamp(miner_trade.timestamp),
-                                miner_trade.bookId, uid, role,
-                                miner_trade.price, miner_trade.quantity,
-                                miner_trade.side if role == 'taker' else int(not miner_trade.side),
-                                miner_trade.makerFee if role == 'maker' else miner_trade.takerFee,
-                                "miner_trades"
-                            ))
+                        # Bounded-slot shape (slot=0 most recent); numeric fields move
+                        # from labels into the gauge value keyed by miner_trade_gauge_name.
+                        # role is encoded 0=maker / 1=taker; timestamp emitted in seconds.
+                        for slot, (miner_trade, role) in enumerate(reversed(self.recent_miner_trades[uid][bookId])):
+                            side = miner_trade.side if role == 'taker' else int(not miner_trade.side)
+                            fee = miner_trade.makerFee if role == 'maker' else miner_trade.takerFee
+                            for name, val in (
+                                ("timestamp", miner_trade.timestamp / 1e9),
+                                ("price", miner_trade.price),
+                                ("volume", miner_trade.quantity),
+                                ("fee", fee),
+                                ("side", side),
+                                ("role", 1 if role == 'taker' else 0),
+                            ):
+                                updates.append((self.prometheus_miner_trades, val,
+                                    wallet_addr, netuid, simid, miner_trade.bookId, uid, slot, name))
                             if role == 'maker':
                                 last_maker_trade = miner_trade
                             if role == 'taker':
@@ -1365,6 +1387,7 @@ async def report(self: ReportingService) -> None:
                 kappa_score=m['kappa_score'],
                 pnl_score=m['pnl_score'],
                 combined_score=m['combined_score'],
+                gentrx_score=m['gentrx_score'],
                 unnormalized_score=m['unnormalized_score'],
                 score=m['score'],
                 miner_gauge_name='miners'
@@ -1402,7 +1425,7 @@ if __name__ == '__main__':
     parser.add_argument('--prometheus.level', type=str, default='INFO')
     parser.add_argument('--cpu-cores', type=str, default=None)
     
-    config = _backfill_nested_namespaces(bt.Config(parser), parser)
+    config = bt.Config(parser)
     bt.logging(config=config)
 
     if config.cpu_cores:

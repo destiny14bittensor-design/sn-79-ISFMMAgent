@@ -18,6 +18,12 @@
 
 if __name__ != "__mp_main__":
     import os
+    # Must precede `import bittensor` below: bittensor 10.3.2 builds its logging
+    # singleton at import time and returns an empty config (disabling logging)
+    # unless BT_NO_PARSE_CLI_ARGS is "false" in the env at that point. The run
+    # scripts also export this, but set it here so a direct `python validator.py`
+    # launch is equally safe. No-op on bittensor <10.3.2.
+    os.environ.setdefault("BT_NO_PARSE_CLI_ARGS", "false")
     import json
     import signal
     import sys
@@ -783,7 +789,9 @@ if __name__ != "__mp_main__":
                             else:
                                 gtx_log.debug("GENTRX_VALIDATOR_S3_* not set — skipping chain commitment")
                         except Exception as exc:
+                            import traceback
                             gtx_log.warning(f"validator chain commit failed: {exc}")
+                            gtx_log.warning(traceback.format_exc())
                         # Register benchmark miner buckets with the gradient server.
                         # These miners can't commit to chain (not registered), so the
                         # validator injects their bucket info via the REST API.
@@ -3204,7 +3212,9 @@ if __name__ != "__mp_main__":
                             ),
                         ))
                     except Exception as exc:
+                        import traceback
                         gtx_log.warning(f"build assignment for uid {uid} failed: {exc}")
+                        gtx_log.warning(traceback.format_exc())
 
                 if not deliveries:
                     return
@@ -4202,13 +4212,21 @@ if __name__ != "__mp_main__":
             self.process_resets(state)
 
             # GenTRX: push state to gradient server before the mining query.
-            # push_state calls _http_post_sync — run in executor to avoid
-            # blocking the event loop while the HTTP connection is in flight.
+            # Offloaded to a thread for the msgpack packing, and time-bounded so
+            # a slow/hung gradient server can never stall the validator's hot
+            # path (state -> query -> reward -> weights). On timeout the executor
+            # thread keeps running harmlessly (push_state is enqueue-only); we
+            # just stop awaiting and proceed.
             if self._gentrx is not None:
                 try:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, self._gentrx.push_state, state
+                    await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, self._gentrx.push_state, state
+                        ),
+                        timeout=10.0,
                     )
+                except asyncio.TimeoutError:
+                    gtx_log.warning("handle_state push_state exceeded 10s — proceeding without it")
                 except Exception as _gex:
                     gtx_log.warning(f"handle_state push_state error: {_gex}")
 
@@ -4221,13 +4239,17 @@ if __name__ != "__mp_main__":
             bt.logging.debug(f"Serialized Response Batch ({time.time()-start}s)")
 
             # GenTRX: poll for round advance and deliver assignments after the
-            # mining query completes. Awaited directly (not fire-and-forget) so
-            # it runs on the same IPC listen loop as forward() but cannot block
-            # the query — it uses the same request queue and pipe, so queries
-            # and deliveries are naturally serialized and never overlap.
+            # mining query completes. Run inline (not fire-and-forget) so it
+            # shares the IPC request queue/pipe with forward() and the two never
+            # overlap. Time-bounded so a slow/hung gradient server can never
+            # throttle the validator's reward/weight pipeline — the backstop is
+            # generous (internal HTTP calls are already 5s-bounded) so it only
+            # trips on a genuine hang, not on a working-but-slow cycle.
             if self._gentrx is not None:
                 try:
-                    await self._gentrx.poll_and_deliver()
+                    await asyncio.wait_for(self._gentrx.poll_and_deliver(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    gtx_log.warning("handle_state poll_and_deliver exceeded 30s — skipping this cycle")
                 except Exception as _gex:
                     gtx_log.warning(f"handle_state poll_and_deliver error: {_gex}")
             # Log response data, start state serialization and reporting threads, and return miner instructions to the simulator

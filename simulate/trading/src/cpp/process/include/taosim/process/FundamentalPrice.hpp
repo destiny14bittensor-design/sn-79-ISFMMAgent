@@ -32,6 +32,7 @@ struct FundamentalPriceDesc
     double sigmaJump;
     double hurst{0.5};
     double epsilon{0.0};
+    Timestamp gracePeriod{};   // suppress seed-update warnings before this t
     ProcessDesc proc;
     const Eigen::MatrixXd* L{};
 };
@@ -78,6 +79,7 @@ private:
     std::mt19937* m_rng;
     uint64_t m_bookId;
     uint64_t m_seedInterval;
+    Timestamp m_gracePeriod{};
     std::string m_seedfile;
     double m_X0, m_mu, m_sigma, m_dt;
     FundamentalPriceState m_state;

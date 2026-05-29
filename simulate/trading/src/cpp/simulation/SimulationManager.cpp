@@ -676,10 +676,16 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(
             mngr->m_io.stop();
         });
 
+    fmt::println(" - Setting up log directory...");
     mngr->setupLogDir(node, baseDir);
 
+    fmt::println(" - Precomputing fundamental-price covariance factor "
+                 "(blocks={}, books/block={})...",
+                 mngr->m_blockInfo.count, mngr->m_blockInfo.dimension);
     taosim::process::helpers::initSharedResources(mngr->m_sharedResources, node);
 
+    fmt::println(" - Configuring {} blocks (books/block={})...",
+                 mngr->m_blockInfo.count, mngr->m_blockInfo.dimension);
     mngr->m_simulations.reserve(mngr->m_blockInfo.count);
     for (size_t blockIdx = 0; blockIdx < mngr->m_blockInfo.count; ++blockIdx) {
         auto simulation = std::make_unique<Simulation>(
@@ -688,6 +694,7 @@ std::unique_ptr<SimulationManager> SimulationManager::fromConfig(
         mngr->m_simulations.push_back(std::move(simulation));
         printProgress(blockIdx + 1, mngr->m_blockInfo.count, "Configuring blocks");
     }
+    fmt::println(" - Block configuration complete.");
 
     mngr->m_gracePeriod = node.child("Agents")
         .child("MultiBookExchangeAgent")
