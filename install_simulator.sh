@@ -12,7 +12,7 @@ cd vcpkg && git reset --hard e140b1fde236eb682b0d47f905e65008a191800f && cd ..
 apt-get install -y curl zip unzip tar make pkg-config autoconf autoconf-archive libcurl4-openssl-dev
 ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-python -m pip install -e .
+python -m pip install .
 
 . /etc/lsb-release
 echo "Ubuntu Version $DISTRIB_RELEASE"

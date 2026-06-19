@@ -25,13 +25,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ENDPOINT=wss://entrypoint-finney.opentensor.ai:443
 WALLET_PATH=~/.bittensor/wallets/
-WALLET_NAME=taos
-HOTKEY_NAME=miner
+WALLET_NAME=main
+HOTKEY_NAME=dollar
 NETUID=79
 AXON_PORT=8091
-AGENT_PATH=~/.taos/agents
-AGENT_NAME=SimpleRegressorAgent
-AGENT_PARAMS="min_quantity=0.1 max_quantity=1.0 expiry_period=200 model=PassiveAggressiveRegressor signal_threshold=0.0025"
+AGENT_PATH=~/workspace/sn-79/agents
+AGENT_NAME=ISFMMAgent
+AGENT_PARAMS="lazy_load=1 history_len=0 inactive_book_fraction=0.375 inactive_buffer_books=10 book_selection_mode=dynamic book_rank_refresh_steps=60 order_qty=0.25 min_order_size=0.0625 gamma=0.5 imbalance_depth=5 imbalance_scale=1.0 max_skew_ticks=2 edge_ticks=1 expiry_period=6000000000 max_maker_fee_rate=0.005 volume_throttle_ratio=0.85 volume_hard_stop_ratio=0.92 capital_turnover_cap=10.0 inventory_soft_ratio=0.40 position_frac=0.015 quote_interval=2 min_realized_observations=3 kappa_lookback_ns=10800000000000 loss_budget_frac=0.001 target_profit_ticks=1 roundtrip_spread_buffer_ticks=1 max_holding_time_ns=600000000000 adverse_move_ticks=2 markout_horizon_steps=3 toxic_markout_ticks=1 toxic_ema_alpha=0.3 toxic_entry_block=0.6 toxic_cooldown_steps=5 toxic_edge_scale=0.8 toxic_skew_ticks=1 toxic_min_qty_scale=0.35 toxic_decay_half_life_steps=20 instruction_pulse_enabled=0 intensity_shadow_mode=1 intensity_enabled=0 deficit_floor_probe_interval_ns=30000000000"
+# intensity_shadow_mode=1, intensity_enabled=0 은 시작 상태.
+# 자동 전환 로직이 조건 충족 시 enabled로 승격하고 악화 시 shadow로 복귀한다.
 LOG_LEVEL=info
 GENTRX=0          # 1 = enable GenTRX training mode
 GENTRX_PARAMS=""  # override GenTRX-specific params (gtx_* keys)
@@ -108,7 +110,7 @@ echo "GENTRX_PARAMS:   ${GENTRX_PARAMS:-(defaults)}"
 
 cd "$REPO_ROOT"
 git pull || { echo "WARNING: git pull failed (no tracking branch?). Continue without updating? [y/N]"; read -r _yn; [ "$_yn" = "y" ] || exit 1; }
-pip install -e .
+/home/administrator/miniconda3/envs/sn79-py3109/bin/pip install -e .
 cd "$REPO_ROOT/taos/im/neurons"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -390,7 +392,7 @@ if [ "$GENTRX" = "1" ]; then
     pm2 delete miner 2>/dev/null || true
     pm2 start miner.py \
         --name=miner \
-        --interpreter python \
+        --interpreter /home/administrator/miniconda3/envs/sn79-py3109/bin/python \
         --cwd "$REPO_ROOT/taos/im/neurons" \
         -- \
         --netuid "$NETUID" \
@@ -431,7 +433,7 @@ else
     pm2 delete miner 2>/dev/null || true
     pm2 start miner.py \
         --name=miner \
-        --interpreter python \
+        --interpreter /home/administrator/miniconda3/envs/sn79-py3109/bin/python \
         --cwd "$REPO_ROOT/taos/im/neurons" \
         -- \
         --netuid "$NETUID" \

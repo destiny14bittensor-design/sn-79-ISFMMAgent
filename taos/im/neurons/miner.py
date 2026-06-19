@@ -35,8 +35,10 @@ if __name__ == "__main__":
 
 if __name__ != "__mp_main__":
     import time
+    import asyncio
     import typing
     import traceback
+    import concurrent.futures
     import bittensor as bt
 
     from taos.common.neurons.miner import BaseMinerNeuron
@@ -75,6 +77,15 @@ if __name__ != "__mp_main__":
             # set but the chain commitment fails — running without commitment
             # means the validator can't find us = no point continuing.
             self._commit_gentrx_bucket()
+
+            # Single-worker thread pool: offloads CPU-bound handle() from the
+            # asyncio event loop so Nonce verification is never blocked, while
+            # serialising calls to keep ISFMMAgent thread-safe (the agent has
+            # extensive shared mutable state and is not designed for concurrent
+            # access across multiple simultaneous handle() invocations).
+            self._handle_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="handle"
+            )
 
         def _commit_gentrx_bucket(self) -> None:
             """Commit GenTRX S3 bucket credentials on-chain.
@@ -174,8 +185,11 @@ if __name__ != "__mp_main__":
             """
             start = time.time()
             synapse.decompress(lazy=self.config.agent.params.lazy_load)
-            bt.logging.info(f"Decompressed ({time.time() - start}s)")
-            synapse.response = self.agent.handle(synapse)
+            bt.logging.debug(f"Decompressed ({time.time() - start}s)")
+            loop = asyncio.get_running_loop()
+            synapse.response = await loop.run_in_executor(
+                self._handle_executor, self.agent.handle, synapse
+            )
             start = time.time()
             compressed = synapse.clear_inputs().compress()
             bt.logging.debug(f"Compressed ({time.time() - start}s)")

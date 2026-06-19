@@ -3,7 +3,7 @@
     traceTime="1" debug="0" error="1" blockCount="8"
     host="localhost" port="8000" bookStateEndpoint="/orderbook"
     generalMsgEndpoint="/account" useMessagePack="1" measureStepWallClockTime="1"
-    ckptIntervalInSteps="60" ckptNumLastFilesToKeep="3" ckptMeasureWallClockTime="1" ckptNumWorkers="8">
+    ckptIntervalInSteps="0" ckptNumLastFilesToKeep="3" ckptMeasureWallClockTime="1" ckptNumWorkers="0">
     <Agents>
         <MultiBookExchangeAgent name="EXCHANGE" remoteAgentCount="264" gracePeriod="600000000000"
             priceDecimals="2" volumeDecimals="4" baseDecimals="4" quoteDecimals="10"

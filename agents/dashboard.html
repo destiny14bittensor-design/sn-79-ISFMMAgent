@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>τaos SN-79 Local Sim Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #c9d1d9; font-family: 'Segoe UI', monospace; font-size: 13px; }
+  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 20px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; font-weight: 600; color: #58a6ff; }
+  .badge { background: #21262d; border: 1px solid #30363d; border-radius: 12px; padding: 3px 10px; font-size: 11px; }
+  .badge.ok { border-color: #238636; color: #3fb950; }
+  .badge.warn { border-color: #d29922; color: #e3b341; }
+  #sim-time { font-size: 14px; font-weight: 600; color: #f0f6fc; margin-left: auto; }
+  #refresh-info { font-size: 11px; color: #6e7681; }
+
+  .section { padding: 16px 20px; }
+  .section-title { font-size: 12px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+
+  /* Agent table */
+  .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid #21262d; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th { background: #161b22; color: #8b949e; font-weight: 500; padding: 8px 10px; text-align: right; white-space: nowrap; font-size: 11px; border-bottom: 1px solid #21262d; }
+  thead th:first-child { text-align: center; }
+  tbody tr { border-bottom: 1px solid #21262d; transition: background 0.1s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: #161b22; }
+  td { padding: 8px 10px; text-align: right; white-space: nowrap; font-size: 12px; }
+  td:first-child { text-align: center; }
+
+  .pos-dot { display: inline-block; width: 24px; height: 24px; border-radius: 4px; background: #238636; line-height: 24px; text-align: center; font-size: 11px; font-weight: 600; color: #fff; }
+
+  .val-green { color: #3fb950; }
+  .val-yellow { color: #e3b341; }
+  .val-red { color: #f85149; }
+  .val-dim { color: #484f58; }
+  .val-blue { color: #58a6ff; }
+  .val-white { color: #f0f6fc; font-weight: 500; }
+
+  /* Score bars */
+  .score-bar-wrap { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+  .score-bar { height: 6px; border-radius: 3px; background: #21262d; width: 60px; overflow: hidden; }
+  .score-bar-fill { height: 100%; border-radius: 3px; background: #238636; transition: width 0.4s; }
+
+  /* Book detail panel */
+  .book-detail { display: none; background: #0d1117; border-top: 1px solid #21262d; }
+  .book-detail.open { display: block; }
+  .book-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; padding: 12px 16px; }
+  .book-card { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; }
+  .book-card-id { font-size: 10px; color: #8b949e; margin-bottom: 4px; }
+  .book-card-row { display: flex; justify-content: space-between; font-size: 11px; margin-top: 2px; }
+  .book-card-label { color: #6e7681; }
+  .obs-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 2px; }
+
+  /* Loading state */
+  .loading { padding: 40px; text-align: center; color: #6e7681; }
+  .error-msg { color: #f85149; background: #1c1c1c; padding: 8px 12px; border-radius: 4px; font-size: 12px; }
+
+  /* Summary cards */
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 12px 16px; min-width: 160px; }
+  .card-label { font-size: 10px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card-value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  .card-sub { font-size: 10px; color: #6e7681; margin-top: 2px; }
+
+  /* Kappa obs histogram */
+  .obs-legend { display: flex; gap: 12px; margin-top: 8px; font-size: 11px; color: #8b949e; }
+  .obs-legend span { display: flex; align-items: center; gap: 4px; }
+
+  .expand-btn { cursor: pointer; color: #58a6ff; font-size: 11px; user-select: none; }
+  .expand-btn:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>τaos SN-79</h1>
+  <span class="badge" id="status-badge">connecting…</span>
+  <span style="color:#8b949e;font-size:12px;">Local Simulation</span>
+  <span id="sim-time">—</span>
+  <span id="refresh-info">auto-refresh 5s</span>
+</header>
+
+<div class="section">
+  <div class="section-title">⬡ Summary</div>
+  <div class="cards" id="summary-cards">
+    <div class="loading">Waiting for data…</div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">⬡ Book Analytics</div>
+  <div id="analytics-section"><div style="color:#6e7681;font-size:12px">Waiting for data…</div></div>
+</div>
+
+<div class="section">
+  <div class="section-title">⬡ Agents</div>
+  <div class="table-wrap">
+    <table id="agent-table">
+      <thead>
+        <tr>
+          <th>Pos</th>
+          <th>Agent</th>
+          <th>24H Vol (QUOTE)</th>
+          <th>24H RT (QUOTE)</th>
+          <th>Activity</th>
+          <th>Realized PnL</th>
+          <th>Median Kappa3</th>
+          <th>Penalty</th>
+          <th>Kappa3 Score</th>
+          <th>Trading Score</th>
+          <th>GenTRX Score</th>
+          <th>Score</th>
+          <th>ΔInv (BASE)</th>
+          <th>BASE Bala</th>
+          <th>BASE Loan</th>
+          <th>BASE Coll</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="agent-tbody">
+        <tr><td colspan="17" class="loading">Waiting for data…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const AGENT_URL = '/stats';
+const REFRESH_MS = 5000;
+
+let expandedRows = new Set();
+
+function fmt(v, decimals=2) {
+  if (v === null || v === undefined) return '<span class="val-dim">—</span>';
+  return (+v).toLocaleString('en-US', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
+}
+
+function scoreColor(v) {
+  if (v === null || v === undefined) return 'val-dim';
+  if (v >= 0.6) return 'val-green';
+  if (v >= 0.4) return 'val-yellow';
+  return 'val-red';
+}
+
+function pnlColor(v) {
+  if (v === null || v === undefined) return 'val-dim';
+  if (v > 0) return 'val-green';
+  if (v < 0) return 'val-red';
+  return 'val-dim';
+}
+
+function scoreBar(v) {
+  if (v === null || v === undefined) return '<span class="val-dim">—</span>';
+  const pct = Math.max(0, Math.min(100, v * 100));
+  const cls = scoreColor(v);
+  const color = cls === 'val-green' ? '#238636' : cls === 'val-yellow' ? '#d29922' : '#da3633';
+  return `<div class="score-bar-wrap">
+    <span class="${cls}">${(+v).toFixed(4)}</span>
+    <div class="score-bar"><div class="score-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+  </div>`;
+}
+
+function renderSummary(data) {
+  const agents = data.agents || [];
+  const a = agents[0] || {};
+  const pnlClass = pnlColor(a.realized_pnl);
+  const totalObs = (a.books || []).reduce((s, b) => s + (b.non_zero_obs || 0), 0);
+  const activeBooks = (a.books || []).filter(b => (b.non_zero_obs || 0) > 0).length;
+
+  document.getElementById('summary-cards').innerHTML = `
+    <div class="card">
+      <div class="card-label">Realized PnL</div>
+      <div class="card-value ${pnlClass}">${fmt(a.realized_pnl, 4)}</div>
+      <div class="card-sub">QUOTE</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Kappa3 Score</div>
+      <div class="card-value ${scoreColor(a.kappa3_score)}">${a.kappa3_score !== null && a.kappa3_score !== undefined ? (+a.kappa3_score).toFixed(4) : '—'}</div>
+      <div class="card-sub">Median: ${a.median_kappa3 !== null && a.median_kappa3 !== undefined ? (+a.median_kappa3).toFixed(4) : '—'}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Activity</div>
+      <div class="card-value ${scoreColor(a.activity)}">${a.activity !== null && a.activity !== undefined ? (a.activity*100).toFixed(1)+'%' : '—'}</div>
+      <div class="card-sub">${activeBooks} active books</div>
+    </div>
+    <div class="card">
+      <div class="card-label">24H RT Vol</div>
+      <div class="card-value val-blue">${fmt(a.rt_vol_24h, 0)}</div>
+      <div class="card-sub">QUOTE roundtrip</div>
+    </div>
+    <div class="card">
+      <div class="card-label">RT Obs</div>
+      <div class="card-value val-white">${totalObs}</div>
+      <div class="card-sub">non-zero observations</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Sim Time</div>
+      <div class="card-value val-white" style="font-size:16px;">${data.sim_time || '—'}</div>
+      <div class="card-sub">${data.book_count} books</div>
+    </div>
+  `;
+}
+
+function renderBooks(books, agentIdx) {
+  if (!books || books.length === 0) return '<div style="padding:8px;color:#6e7681">No book data</div>';
+  const cards = books.map(b => {
+    const k = b.kappa3 !== null && b.kappa3 !== undefined ? b.kappa3 : null;
+    const kColor = k !== null ? scoreColor(k) : 'val-dim';
+    const obsColor = b.non_zero_obs >= 3 ? '#3fb950' : b.non_zero_obs > 0 ? '#e3b341' : '#484f58';
+    const pnlC = pnlColor(b.realized_pnl);
+    return `<div class="book-card">
+      <div class="book-card-id">BOOK ${b.book_id}</div>
+      <div class="book-card-row"><span class="book-card-label">PnL</span><span class="${pnlC}">${fmt(b.realized_pnl,4)}</span></div>
+      <div class="book-card-row"><span class="book-card-label">Obs</span><span><span class="obs-dot" style="background:${obsColor}"></span>${b.non_zero_obs}</span></div>
+      <div class="book-card-row"><span class="book-card-label">Kappa3</span><span class="${kColor}">${k !== null ? k.toFixed(3) : '—'}</span></div>
+      <div class="book-card-row"><span class="book-card-label">Inventory</span><span>${fmt(b.inventory,4)}</span></div>
+      <div class="book-card-row"><span class="book-card-label">Age(s)</span><span class="${(b.inventory_age_s||0)>300?'val-red':(b.inventory_age_s||0)>60?'val-yellow':'val-dim'}">${b.inventory_age_s||0}</span></div>
+      <div class="book-card-row"><span class="book-card-label">BidF/AskF</span><span>${b.bid_fill_count||0}/${b.ask_fill_count||0}</span></div>
+      <div class="book-card-row"><span class="book-card-label">SxF/SxO</span><span class="${(b.short_exit_fill_count||0)<(b.short_exit_order_count||0)?'val-yellow':'val-dim'}">${b.short_exit_fill_count||0}/${b.short_exit_order_count||0}</span></div>
+      <div class="book-card-row"><span class="book-card-label">BidToxic</span><span class="${b.bid_toxic>0.3?'val-red':'val-dim'}">${b.bid_toxic.toFixed(2)}</span></div>
+      <div class="book-card-row"><span class="book-card-label">AskToxic</span><span class="${b.ask_toxic>0.3?'val-red':'val-dim'}">${b.ask_toxic.toFixed(2)}</span></div>
+    </div>`;
+  }).join('');
+  return `<div class="book-grid">${cards}</div>`;
+}
+
+function renderAnalytics(agent) {
+  if (!agent) return;
+  const tl = (agent.top_long_books || []);
+  const ts = (agent.top_short_books || []);
+  const nk = (agent.negative_kappa_books || []);
+  const medPnl = agent.median_book_realized_pnl;
+
+  function invRows(arr, side) {
+    if (!arr.length) return `<tr><td colspan="4" style="color:#6e7681;padding:4px 8px">none</td></tr>`;
+    return arr.map(b => `<tr>
+      <td style="padding:3px 8px">#${b.book_id}</td>
+      <td style="padding:3px 8px" class="${b.inventory>0?'val-green':'val-red'}">${(+b.inventory).toFixed(4)}</td>
+      <td style="padding:3px 8px" class="${b.inventory_age_s>300?'val-red':b.inventory_age_s>60?'val-yellow':'val-dim'}">${b.inventory_age_s}s</td>
+      <td style="padding:3px 8px" class="${pnlColor(b.realized_pnl)}">${(+b.realized_pnl).toFixed(4)}</td>
+    </tr>`).join('');
+  }
+
+  document.getElementById('analytics-section').innerHTML = `
+  <div style="display:flex;gap:16px;flex-wrap:wrap">
+    <div style="flex:1;min-width:220px">
+      <div class="section-title">Top Long Books</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:#8b949e">
+          <th style="text-align:left;padding:3px 8px">Book</th>
+          <th style="text-align:left;padding:3px 8px">Inv</th>
+          <th style="text-align:left;padding:3px 8px">Age</th>
+          <th style="text-align:left;padding:3px 8px">PnL</th>
+        </tr></thead>
+        <tbody>${invRows(tl,'long')}</tbody>
+      </table>
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div class="section-title">Top Short Books</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:#8b949e">
+          <th style="text-align:left;padding:3px 8px">Book</th>
+          <th style="text-align:left;padding:3px 8px">Inv</th>
+          <th style="text-align:left;padding:3px 8px">Age</th>
+          <th style="text-align:left;padding:3px 8px">PnL</th>
+        </tr></thead>
+        <tbody>${invRows(ts,'short')}</tbody>
+      </table>
+    </div>
+    <div style="flex:1;min-width:220px">
+      <div class="section-title">Book Summary</div>
+      <div style="font-size:12px;line-height:1.8">
+        <div><span style="color:#8b949e">Median Book PnL:</span> <span class="${pnlColor(medPnl)}">${medPnl !== null && medPnl !== undefined ? (+medPnl).toFixed(6) : '—'}</span></div>
+        <div><span style="color:#8b949e">Negative Kappa Books:</span> <span class="${nk.length>10?'val-red':nk.length>3?'val-yellow':'val-dim'}">${nk.length}</span>
+          ${nk.length ? '<span style="color:#6e7681;font-size:11px"> ['+nk.slice(0,8).join(', ')+(nk.length>8?'…':'')+']</span>' : ''}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderAgents(data) {
+  const agents = data.agents || [];
+  if (agents.length === 0) {
+    document.getElementById('agent-tbody').innerHTML = '<tr><td colspan="17" class="loading">No agents yet…</td></tr>';
+    return;
+  }
+
+  const sorted = [...agents].sort((a, b) => (b.score || 0) - (a.score || 0));
+  let html = '';
+  sorted.forEach((a, idx) => {
+    const rowId = `row-${idx}`;
+    const detailId = `detail-${idx}`;
+    const isOpen = expandedRows.has(idx);
+
+    html += `<tr id="${rowId}" style="cursor:pointer" onclick="toggleBooks(${idx})">
+      <td><span class="pos-dot">${idx}</span></td>
+      <td class="val-blue" style="text-align:left;padding-left:12px;">${a.uid}</td>
+      <td>${fmt(a.vol_24h, 2)}</td>
+      <td>${fmt(a.rt_vol_24h, 2)}</td>
+      <td class="${scoreColor(a.activity)}">${a.activity !== null ? (a.activity*100).toFixed(2)+'%' : '—'}</td>
+      <td class="${pnlColor(a.realized_pnl)}">${fmt(a.realized_pnl, 2)}</td>
+      <td class="${scoreColor(a.median_kappa3)}">${a.median_kappa3 !== null ? (+a.median_kappa3).toFixed(4) : '—'}</td>
+      <td class="${a.kappa_penalty > 0 ? 'val-red' : 'val-dim'}">${a.kappa_penalty !== null ? (+a.kappa_penalty).toFixed(4) : '—'}</td>
+      <td>${scoreBar(a.kappa3_score)}</td>
+      <td>${scoreBar(a.trading_score)}</td>
+      <td class="val-dim">${fmt(a.gentrx_score, 4)}</td>
+      <td class="${scoreColor(a.score)} val-white">${a.score !== null ? (+a.score).toFixed(4) : '—'}</td>
+      <td>${fmt(a.delta_inv, 4)}</td>
+      <td class="val-white">${fmt(a.base_balance, 2)}</td>
+      <td class="val-dim">${fmt(a.base_loan, 2)}</td>
+      <td class="val-dim">${fmt(a.base_coll, 2)}</td>
+      <td><span class="expand-btn">${isOpen ? '▲' : '▼'}</span></td>
+    </tr>
+    <tr><td colspan="17" style="padding:0"><div id="${detailId}" class="book-detail ${isOpen ? 'open' : ''}">${isOpen ? renderBooks(a.books, idx) : ''}</div></td></tr>`;
+  });
+
+  document.getElementById('agent-tbody').innerHTML = html;
+}
+
+function toggleBooks(idx) {
+  const detailEl = document.getElementById(`detail-${idx}`);
+  if (!detailEl) return;
+  if (expandedRows.has(idx)) {
+    expandedRows.delete(idx);
+    detailEl.classList.remove('open');
+  } else {
+    expandedRows.add(idx);
+    detailEl.classList.add('open');
+    // Populate if not yet
+    if (!detailEl.innerHTML.trim()) {
+      detailEl.innerHTML = '<div style="padding:8px;color:#6e7681">Loading…</div>';
+    }
+  }
+  // Re-render to update arrow and content
+  fetchAndRender();
+}
+
+let lastData = null;
+
+async function fetchAndRender() {
+  try {
+    const resp = await fetch(AGENT_URL, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    lastData = data;
+
+    document.getElementById('sim-time').textContent = data.sim_time || '—';
+    const badge = document.getElementById('status-badge');
+    badge.textContent = 'live';
+    badge.className = 'badge ok';
+
+    renderSummary(data);
+    renderAnalytics((data.agents || [])[0]);
+    renderAgents(data);
+    document.getElementById('refresh-info').textContent = `last update ${new Date().toLocaleTimeString()} · auto-refresh 5s`;
+  } catch (e) {
+    const badge = document.getElementById('status-badge');
+    badge.textContent = 'offline';
+    badge.className = 'badge warn';
+    document.getElementById('refresh-info').textContent = `error: ${e.message}`;
+  }
+}
+
+fetchAndRender();
+setInterval(fetchAndRender, REFRESH_MS);
+</script>
+</body>
+</html>
